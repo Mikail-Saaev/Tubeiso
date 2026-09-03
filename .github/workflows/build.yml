@@ -69,6 +69,12 @@ jobs:
         shell: bash
         run: python tests/test_tubeiso.py
 
+      - name: Preparer la reference de simulation
+        run: python tests/simulation_ref.py exemple_LFT.xlsx
+
+      - name: Verifier la simulation de cintrage
+        run: node tests/test_simulation.mjs
+
       - name: Construire l'executable
         run: pyinstaller tubeiso.spec --noconfirm --clean
 

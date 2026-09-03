@@ -1,0 +1,91 @@
+{
+ "cases": [
+  {
+   "ref": "412",
+   "developed": 263.571815,
+   "end_point": [
+    185.013739,
+    -6.58751,
+    167.148141
+   ],
+   "simulation": {
+    "straights": [
+     39.5,
+     142.0,
+     70.744628
+    ],
+    "bends": [
+     {
+      "angle": 46.0,
+      "rotation": 0.0,
+      "clr": 11.0
+     },
+     {
+      "angle": 13.0,
+      "rotation": 24.0,
+      "clr": 11.0
+     }
+    ],
+    "handedness": 1
+   }
+  },
+  {
+   "ref": "409",
+   "developed": 266.036139,
+   "end_point": [
+    140.960904,
+    4.459875,
+    210.046502
+   ],
+   "simulation": {
+    "straights": [
+     18.0,
+     183.0,
+     44.511067
+    ],
+    "bends": [
+     {
+      "angle": 65.0,
+      "rotation": 0.0,
+      "clr": 14.0
+     },
+     {
+      "angle": 19.0,
+      "rotation": 197.0,
+      "clr": 14.0
+     }
+    ],
+    "handedness": 1
+   }
+  },
+  {
+   "ref": "407",
+   "developed": 175.250239,
+   "end_point": [
+    89.550826,
+    -43.178129,
+    82.769523
+   ],
+   "simulation": {
+    "straights": [
+     28.0,
+     82.0,
+     40.484017
+    ],
+    "bends": [
+     {
+      "angle": 39.0,
+      "rotation": 0.0,
+      "clr": 11.0
+     },
+     {
+      "angle": 90.0,
+      "rotation": 57.0,
+      "clr": 11.0
+     }
+    ],
+    "handedness": 1
+   }
+  }
+ ]
+}

@@ -41,7 +41,7 @@ def free_port(preferred: int = 8731) -> int:
     raise RuntimeError("aucun port disponible sur 127.0.0.1")
 
 
-def wait_ready(url: str, timeout: float = 25.0) -> bool:
+def wait_ready(url: str, timeout: float = 90.0) -> bool:
     import urllib.error
     import urllib.request
     deadline = time.time() + timeout
@@ -114,10 +114,19 @@ def main(argv: list[str] | None = None) -> int:
     thread.start()
 
     print(BANNER)
-    if not wait_ready(url + "api/status"):
-        print("Le serveur n'a pas demarre.", file=sys.stderr)
-        return 1
+    ready = wait_ready(url + "api/status")
     print(f"  Interface : {url}")
+    if not ready:
+        # Machine lente, antivirus qui inspecte le binaire, premier
+        # chargement du noyau CAO : le demarrage peut depasser la minute.
+        # On previent sans tuer le serveur, qui finit generalement par
+        # repondre. Quitter ici priverait l'utilisateur de l'application
+        # pour une simple lenteur.
+        if not thread.is_alive():
+            print("  Le serveur s'est arrete au demarrage.", file=sys.stderr)
+            return 1
+        print("  Demarrage plus long que prevu — laissez la page se charger,")
+        print("  ou ouvrez l'adresse ci-dessus manuellement.")
     print("  Fermez cette fenetre pour quitter.\n")
 
     if open_window(url, args.mode):

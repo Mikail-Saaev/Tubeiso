@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
+import { centerlineAt, stepLabel, ROT_PART } from './simulation.js';
 
 /* ══════════════════════════════════════════════════════ état de l'application */
 
@@ -12,8 +13,19 @@ const S = {
   picked: [],         // points cliqués en cours de mesure
   measures: [],       // mesures validées
   framePts: null,     // points servant au recadrage
+  sim: null,          // données de simulation de la pièce affichée
+  settings: null,     // configuration et valeurs de référence
   show: { mesh: true, wire: false, axis: true, nodes: true, dims: true },
 };
+
+/* État de la simulation. Déclaré ici et non plus bas : la boucle de rendu
+   démarre dès l'évaluation du module et y accède immédiatement. Une
+   déclaration `let` placée après provoquerait une erreur de zone morte
+   temporelle, qui fige tout le rendu 3D sans message. */
+let simMesh = null;
+let simPlaying = false;
+let simProgress = 0;
+let simLast = 0;
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -26,6 +38,17 @@ function say(msg, kind = '') {
                  : kind === 'ok' ? 'var(--ok)' : '';
 }
 const busy = (on) => { $('#spinner').hidden = !on; };
+
+/* Une erreur JavaScript silencieuse laisse l'interface figée sans explication.
+   On les remonte dans la barre d'état et dans la console. */
+window.addEventListener('error', (e) => {
+  console.error(e.error || e.message);
+  say(`Erreur interne : ${e.message}`, 'err');
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.error(e.reason);
+  say(`Erreur interne : ${e.reason?.message ?? e.reason}`, 'err');
+});
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -340,15 +363,16 @@ function resize() {
 }
 new ResizeObserver(resize).observe($('#canvas-wrap'));
 
-function loop() {
+function loop(now) {
   requestAnimationFrame(loop);
   controls.update();
+  tickSim(now || performance.now());
   renderer.render(scene, camera);
   if (S.show.dims) drawLabels();
   const d = camera.position.length();
   $('#readout').textContent = S.detail
-    ? `Ø${S.detail.diameter}  ·  ${S.detail.bends.length} coudes  ·  `
-      + `développé ${fmt(S.detail.developed, 2)} mm  ·  zoom ${fmt(d, 0)}`
+    ? `Ø${S.detail.diameter} · ${S.detail.bends.length}c · `
+      + `dév. ${fmt(S.detail.developed, 1)} mm`
     : '';
 }
 resize();
@@ -479,6 +503,8 @@ async function select(ref) {
   say(`Chargement du repère ${ref}…`);
   try {
     const d = await api(`/api/tube/${encodeURIComponent(ref)}`);
+    S.sim = d.simulation || null;
+    stopSim();
     showTube(d);
     renderDims(d);
     renderDiag(d);
@@ -529,6 +555,42 @@ $('#open').onclick = async () => {
 };
 
 $('#path').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#open').click(); });
+
+/* Le navigateur ne divulgue jamais le chemin réel d'un fichier. On envoie
+   donc son contenu au serveur local, qui l'écrit dans un dossier temporaire
+   et le traite. Fonctionne en fenêtre native comme en onglet. */
+$('#browse').onclick = () => $('#file').click();
+
+$('#file').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const form = new FormData();
+  form.append('file', f);
+  busy(true);
+  say(`Lecture de ${f.name}…`);
+  try {
+    const res = await api('/api/upload', { method: 'POST', body: form });
+    $('#path').value = f.name;
+    if (res.kind === 'step') {
+      S.tubes = []; S.ref = null; renderList();
+      showStep(res.data);
+      renderStepDims(res.data);
+      say(`STEP lu : ${res.data.features.length} éléments reconnus.`, 'ok');
+    } else {
+      S.tubes = res.data.tubes;
+      renderList();
+      const ok = S.tubes.filter((t) => t.status !== 'erreur').length;
+      say(`${res.data.count} pièces — ${ok} exploitables, `
+          + `${res.data.count - ok} à corriger.`);
+      if (S.tubes.length) await select(S.tubes[0].ref);
+    }
+  } catch (err) {
+    say(err.message, 'err');
+  } finally {
+    busy(false);
+    e.target.value = '';
+  }
+};
 $('#filter').oninput = renderList;
 
 $$('[data-toggle]').forEach((b) => {
@@ -557,6 +619,7 @@ $$('.tabs button').forEach((b) => {
     $$('.tab').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
     $(`#tab-${b.dataset.tab}`).classList.add('on');
+    if (b.dataset.tab === 'set') renderSettings();
   };
 });
 
@@ -598,7 +661,242 @@ api('/api/status').then((s) => {
   $('#cad').textContent = s.cad ? 'Noyau CAO actif' : 'Noyau CAO absent — 3D indisponible';
   $('#cad').style.color = s.cad ? '' : 'var(--warn)';
   // ?path=... permet d'ouvrir directement un fichier, pratique pour un raccourci
-  const q = new URLSearchParams(location.search).get('path');
+  const qs = new URLSearchParams(location.search);
+  const wanted = qs.get('tab');
+  if (wanted) {
+    const b = document.querySelector(`.tabs button[data-tab="${wanted}"]`);
+    if (b) b.click();
+  }
+  const q = qs.get('path');
   const start = q || s.source;
   if (start) { $('#path').value = start; $('#open').click(); }
 }).catch(() => say('Serveur injoignable.', 'err'));
+
+/* ═══════════════════════════════════════════ simulation du cintrage */
+
+function drawSim() {
+  if (!S.sim || !S.detail) return;
+  const pts = centerlineAt(S.sim, simProgress);
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.02);
+  const geom = new THREE.TubeGeometry(
+    curve, Math.min(420, pts.length * 3), (S.detail.diameter || 6) / 2, 14, false,
+  );
+  if (simMesh) {
+    simMesh.geometry.dispose();
+    simMesh.geometry = geom;
+  } else {
+    simMesh = new THREE.Mesh(geom, simMaterial());
+    model.add(simMesh);
+  }
+  $('#simRange').value = String(Math.round(
+    (simProgress / Math.max(S.sim.bends.length, 1)) * 1000));
+
+  const st = stepLabel(S.sim, simProgress);
+  $('#simStep').textContent = st.done
+    ? `Terminé — développé ${fmt(S.sim.blank_length, 1)} mm`
+    : `Coude ${st.index + 1}/${S.sim.bends.length} · `
+      + (st.phase === 'rotation'
+        ? `rotation ${st.bend.rotation.toFixed(0)}°`
+        : `cintrage ${st.bend.angle.toFixed(0)}°`)
+      + ` · Rm ${st.bend.clr} mm`;
+}
+
+function startSim() {
+  if (!S.sim || !S.sim.bends.length) {
+    say('Pas de coude à simuler sur cette pièce.', 'err');
+    return;
+  }
+  $('#simbar').hidden = false;
+  $('#simulate').classList.add('on');
+  if (parts.mesh) parts.mesh.visible = false;
+  if (parts.wire) parts.wire.visible = false;
+  if (parts.axis) parts.axis.visible = false;
+  $('#labels').style.display = 'none';
+  simProgress = 0;
+  simLast = performance.now();
+  simPlaying = true;
+  $('#simPlay').textContent = '⏸';
+  drawSim();
+  say('Simulation : le tube part droit, à sa longueur développée.');
+}
+
+function stopSim() {
+  simPlaying = false;
+  $('#simbar').hidden = true;
+  $('#simulate').classList.remove('on');
+  $('#simPlay').textContent = '▶';
+  if (simMesh) {
+    model.remove(simMesh);
+    simMesh.geometry.dispose();
+    simMesh = null;
+  }
+  applyToggles();
+}
+
+$('#simulate').onclick = () => (simMesh ? stopSim() : startSim());
+$('#simPlay').onclick = () => {
+  simPlaying = !simPlaying;
+  simLast = performance.now();
+  if (simPlaying && S.sim && simProgress >= S.sim.bends.length) simProgress = 0;
+  $('#simPlay').textContent = simPlaying ? '⏸' : '▶';
+};
+$('#simReset').onclick = () => { simProgress = 0; drawSim(); };
+$('#simRange').oninput = (e) => {
+  simPlaying = false;
+  $('#simPlay').textContent = '▶';
+  simProgress = (Number(e.target.value) / 1000) * (S.sim ? S.sim.bends.length : 1);
+  drawSim();
+};
+
+function tickSim(now) {
+  if (!simPlaying || !S.sim) return;
+  const dt = (now - simLast) / 1000;
+  simLast = now;
+  simProgress += dt * Number($('#simSpeed').value);
+  if (simProgress >= S.sim.bends.length) {
+    simProgress = S.sim.bends.length;
+    simPlaying = false;
+    $('#simPlay').textContent = '▶';
+  }
+  drawSim();
+}
+
+/* ═══════════════════════════════════════════════════ onglet Réglages */
+
+function numInput(id, value, ref, step = 'any') {
+  const changed = ref !== undefined && ref !== null
+    && Number(value) !== Number(ref) ? ' changed' : '';
+  const v = value === null || value === undefined ? '' : value;
+  return `<input id="${id}" type="number" step="${step}" value="${v}"
+           class="${changed.trim()}">`;
+}
+
+async function renderSettings() {
+  const host = $('#tab-set');
+  if (!S.settings) {
+    try {
+      S.settings = await api('/api/settings');
+    } catch (e) {
+      host.innerHTML = `<div class="issue erreur">${e.message}</div>`;
+      return;
+    }
+  }
+  const { config, conventions: convs, reference } = S.settings;
+
+  const cards = Object.entries(config.tooling)
+    .sort((a, b) => a[1].diameter - b[1].diameter)
+    .map(([name, t]) => {
+    const d = Math.round(t.diameter);
+    const rmRef = reference.rm[d];
+    const elRef = reference.elongation[d];
+    const msRef = reference.min_straight[d];
+    return `<div class="tool-card" data-tool="${name}">
+      <h4>${name}</h4>
+      <span class="ref">Référence BSA — Rm ${rmRef ?? '—'} mm ·
+        allongement ${elRef ?? '—'} % · droite mini ${msRef ?? '—'} mm</span>
+      <div class="grid">
+        <div><label>Rayon Rm (mm)</label>${numInput(`t_${name}_clr`, t.clr, rmRef, '0.1')}</div>
+        <div><label>Paroi (mm)</label>${numInput(`t_${name}_wall`, t.wall, null, '0.05')}</div>
+        <div><label>Allongement (%)</label>${numInput(`t_${name}_elong`, t.elongation, elRef, '0.1')}</div>
+        <div><label>Droite mini (mm)</label>${numInput(`t_${name}_ms`, t.min_straight, msRef, '0.5')}</div>
+        <div><label>Angle max (°)</label>${numInput(`t_${name}_maxa`, t.max_angle, null, '1')}</div>
+        <div><label>Matière</label><input id="t_${name}_mat" type="text"
+             value="${t.material ?? ''}" style="text-align:left"></div>
+      </div></div>`;
+  }).join('');
+
+  host.innerHTML = `
+    <h3 class="sec">Général</h3>
+    <div class="set-row"><label>Convention de longueur</label>
+      <select id="s_conv">${convs.map((c) => `<option value="${c}"
+        ${c === config.convention ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+    <div class="set-row"><label>Sens de rotation</label>
+      <select id="s_hand">
+        <option value="1" ${config.handedness === 1 ? 'selected' : ''}>+1 — horaire (tête du bas)</option>
+        <option value="-1" ${config.handedness === -1 ? 'selected' : ''}>−1 — antihoraire (tête du haut)</option>
+      </select></div>
+    <div class="set-row"><label>Tolérance de bouclage R6 (mm)</label>
+      ${numInput('s_tol', config.length_tolerance, null, '0.1')}</div>
+
+    <h3 class="sec">Outillage par diamètre</h3>
+    ${cards}
+
+    <h3 class="sec">Limites machine (lecture seule)</h3>
+    <dl class="kv">
+      <dt>Développé</dt><dd>${reference.developed[0]} – ${reference.developed[2]} mm</dd>
+      <dt>Recommandé mini</dt><dd>${reference.developed[1]} mm</dd>
+      <dt>Dernier segment max</dt><dd>${reference.max_last} mm</dd>
+    </dl>
+
+    <div class="set-actions">
+      <button id="s_apply" class="primary">Appliquer</button>
+      <button id="s_reset">Réinitialiser</button>
+    </div>
+    <p class="set-note">Appliquer relit le fichier ouvert avec les nouvelles
+      valeurs, et la pièce sélectionnée est retracée. Un champ en orange
+      s'écarte de la valeur de référence de la documentation BSA.</p>`;
+
+  $('#s_apply').onclick = applySettings;
+  $('#s_reset').onclick = async () => {
+    busy(true);
+    try {
+      const r = await api('/api/settings/reset', { method: 'POST' });
+      S.settings = null;
+      await renderSettings();
+      if (r.reloaded && r.reloaded.tubes) {
+        S.tubes = r.reloaded.tubes;
+        renderList();
+        if (S.ref) await select(S.ref);
+      }
+      say('Réglages remis aux valeurs BSA par défaut.', 'ok');
+    } catch (e) {
+      say(e.message, 'err');
+    } finally {
+      busy(false);
+    }
+  };
+}
+
+function readNum(id) {
+  const el = $(`#${CSS.escape(id)}`);
+  if (!el || el.value === '') return null;
+  return Number(el.value);
+}
+
+async function applySettings() {
+  const cfg = JSON.parse(JSON.stringify(S.settings.config));
+  cfg.convention = $('#s_conv').value;
+  cfg.handedness = Number($('#s_hand').value);
+  cfg.length_tolerance = readNum('s_tol') ?? 1.0;
+
+  for (const name of Object.keys(cfg.tooling)) {
+    const t = cfg.tooling[name];
+    t.clr = readNum(`t_${name}_clr`);
+    t.wall = readNum(`t_${name}_wall`);
+    t.elongation = readNum(`t_${name}_elong`) ?? 0;
+    t.min_straight = readNum(`t_${name}_ms`);
+    t.max_angle = readNum(`t_${name}_maxa`) ?? 184;
+    const mat = $(`#${CSS.escape(`t_${name}_mat`)}`);
+    t.material = mat && mat.value ? mat.value : null;
+  }
+
+  busy(true);
+  try {
+    const r = await api('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    S.settings.config = cfg;
+    if (r.reloaded && r.reloaded.tubes) {
+      S.tubes = r.reloaded.tubes;
+      renderList();
+      if (S.ref) await select(S.ref);
+    }
+    await renderSettings();
+    say('Réglages appliqués et pièce retracée.', 'ok');
+  } catch (e) {
+    say(`Réglages refusés : ${e.message}`, 'err');
+  } finally {
+    busy(false);
+  }
+}

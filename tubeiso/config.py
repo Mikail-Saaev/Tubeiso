@@ -13,22 +13,31 @@ from pathlib import Path
 from . import bsa
 from .model import Tooling
 
+def _default_tooling() -> dict:
+    """Table outillage par defaut, issue des tables BSA (bsa.py)."""
+    return {
+        f"\u00d8{d}": {
+            "diameter": float(d),
+            "clr": float(bsa.RM[d]),
+            "wall": None,
+            "material": None,
+            "elongation": float(bsa.ELONGATION_PCT.get(d, 0.0)),
+            "min_straight": bsa.MIN_STRAIGHT.get(d),
+            "max_angle": 184.0,
+        }
+        for d in sorted(bsa.RM)
+    }
+
+
 DEFAULT_CONFIG = {
-    "convention": "feed_only",
+    "convention": "bsa",
     "handedness": 1,
-    "length_tolerance": 0.5,
-    "tooling": {
-        "L54": {"diameter": 4.0, "clr": None, "wall": None, "material": None,
-                "min_straight": None, "max_angle": 180.0, "elongation": 0.0},
-        "L56": {"diameter": 6.0, "clr": None, "wall": None, "material": None,
-                "min_straight": None, "max_angle": 180.0, "elongation": 0.0},
-        "L58": {"diameter": 8.0, "clr": None, "wall": None, "material": None,
-                "min_straight": None, "max_angle": 180.0, "elongation": 0.0},
-    },
+    "length_tolerance": 1.0,
+    "tooling": _default_tooling(),
     "code_mat_to_tooling": {
-        "293-421-006": "L56",
-        "293-421-008": "L58",
-        "416-421-004": "L54",
+        "293-421-006": "\u00d86",
+        "293-421-008": "\u00d88",
+        "416-421-004": "\u00d84",
     },
 }
 

@@ -12,7 +12,9 @@ rien n'est expose sur le reseau.
 from __future__ import annotations
 
 import secrets
+import shutil
 import sys
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -34,6 +36,10 @@ class Session:
         self.config = Config.load(None)
         self.source: Path | None = None
         self.tubes: dict[str, dict] = {}
+        self.workdir = tempfile.mkdtemp(prefix="tubeiso-")
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.workdir, ignore_errors=True)
 
     # ------------------------------------------------------------ chargement
     def open_lft(self, path: str, column: str = "PROGCRIPPA") -> dict:
@@ -140,6 +146,15 @@ class Session:
             "issues": [{"level": i.level, "code": i.code, "message": i.message,
                         "source": i.source} for i in e["issues"]],
             "status": validate.worst(e["issues"]),
+            # De quoi rejouer le cintrage pas a pas dans le navigateur :
+            # les memes donnees que celles qui ont servi a construire la piece.
+            "simulation": {
+                "straights": [round(v, 4) for v in tube.straights],
+                "bends": [{"angle": b.angle, "rotation": b.rotation,
+                           "clr": b.clr} for b in tube.bends],
+                "handedness": self.config.handedness,
+                "blank_length": round(cl.developed, 3),
+            },
         }
 
     # ---------------------------------------------------------------- exports
@@ -174,6 +189,10 @@ class Session:
 
 def create_app(session: Session | None = None, token: str | None = None) -> Flask:
     app = Flask(__name__, static_folder=None)
+    # Flask trie les cles JSON par defaut, ce qui renverrait les outillages
+    # dans l'ordre alphabetique : O10, O12, O15... avant O4. On conserve
+    # l'ordre d'insertion, qui est l'ordre croissant des diametres.
+    app.json.sort_keys = False
     app.config["SESSION"] = session or Session()
     app.config["TOKEN"] = token or secrets.token_urlsafe(16)
 
@@ -222,6 +241,73 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
             "count": len(s.tubes),
             "diameters": sorted(bsa.RM),
         })
+
+    @app.post("/api/upload")
+    def upload():
+        """Recoit un fichier choisi dans l'explorateur du systeme.
+
+        Le navigateur ne communique jamais le chemin reel d'un fichier, pour
+        des raisons de confidentialite. On recupere donc son contenu, on
+        l'ecrit dans un dossier temporaire, et on traite ce fichier-la. Cela
+        fonctionne aussi bien en fenetre native que dans un onglet.
+        """
+        s: Session = app.config["SESSION"]
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return api_error(ValueError("aucun fichier recu"))
+        safe = Path(f.filename).name
+        target = Path(s.workdir) / safe
+        f.save(target)
+        try:
+            if target.suffix.lower() in (".stp", ".step"):
+                return jsonify({"kind": "step",
+                                "data": stepreader.analyse(str(target))})
+            return jsonify({"kind": "lft", "data": s.open_lft(str(target)),
+                            "path": str(target)})
+        except Exception as exc:
+            return api_error(exc)
+
+    @app.get("/api/settings")
+    def get_settings():
+        s: Session = app.config["SESSION"]
+        return jsonify({
+            "config": s.config.data,
+            "conventions": sorted(conventions.REGISTRY),
+            "reference": {
+                "rm": bsa.RM,
+                "elongation": bsa.ELONGATION_PCT,
+                "elasticity": bsa.ELASTICITY_PCT,
+                "min_straight": bsa.MIN_STRAIGHT,
+                "min_last": bsa.MIN_LAST,
+                "min_last_two": bsa.MIN_LAST_TWO,
+                "max_last": bsa.MAX_LAST,
+                "developed": [bsa.MIN_DEVELOPED, bsa.RECOMMENDED_DEVELOPED,
+                              bsa.MAX_DEVELOPED],
+            },
+        })
+
+    @app.post("/api/settings")
+    def post_settings():
+        """Applique une configuration et rejoue le fichier courant, pour que
+        l'effet de chaque reglage soit immediatement visible."""
+        s: Session = app.config["SESSION"]
+        data = request.get_json(force=True, silent=True) or {}
+        previous = s.config
+        try:
+            s.config = Config(data)
+            conventions.get(s.config.convention)      # valide le nom
+            reloaded = s.open_lft(str(s.source)) if s.source else {"tubes": []}
+            return jsonify({"ok": True, "reloaded": reloaded})
+        except Exception as exc:
+            s.config = previous
+            return api_error(exc)
+
+    @app.post("/api/settings/reset")
+    def reset_settings():
+        s: Session = app.config["SESSION"]
+        s.config = Config.load(None)
+        reloaded = s.open_lft(str(s.source)) if s.source else {"tubes": []}
+        return jsonify({"ok": True, "config": s.config.data, "reloaded": reloaded})
 
     @app.post("/api/open")
     def open_file():

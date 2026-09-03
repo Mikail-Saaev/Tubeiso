@@ -106,8 +106,9 @@ signale immédiatement les programmes tronqués.
 
 ## Utiliser l'interface
 
-**Ouvrir.** Collez le chemin d'un fichier LFT (`.xlsx`) ou d'un modèle
-(`.stp`, `.step`) dans la barre du haut, puis Entrée.
+**Ouvrir.** Cliquez sur **`Parcourir…`** et choisissez votre fichier LFT
+(`.xlsx`) ou votre modèle (`.stp`, `.step`). Le champ de texte reste
+disponible si vous préférez coller un chemin.
 
 **Choisir une pièce.** La liste de gauche montre une pastille par pièce :
 verte conforme, orange alerte, rouge erreur.
@@ -126,9 +127,26 @@ sommets de triangle.
 **Exporter.** `Exporter la pièce` ou `Tout exporter`, puis choisissez le
 dossier et les formats.
 
-**Les trois onglets de droite.** *Cotations* donne la table LRA exacte,
+**Simuler le cintrage.** Le bouton `Simuler` rejoue la fabrication de la
+pièce : le tube part droit, à sa longueur développée, puis chaque coude se
+forme dans l'ordre — d'abord la rotation du plan, puis le pliage, comme sur la
+machine. Une barre apparaît avec lecture, pause, curseur de position et
+vitesse. L'étape en cours est nommée : numéro du coude, phase, rayon utilisé.
+
+**Les quatre onglets de droite.** *Cotations* donne la table LRA exacte,
 *Diagnostic* la liste des contrôles avec leur source dans la documentation
-Crippa, *Programme* le code ISO d'origine.
+Crippa, *Programme* le code ISO d'origine, *Réglages* la configuration
+complète.
+
+**Régler.** L'onglet *Réglages* expose chaque paramètre : convention de
+longueur, sens de rotation, tolérance de bouclage, et pour chaque diamètre le
+rayon Rm, la paroi, la matière, l'allongement, la droite minimale et l'angle
+maximal. La valeur de référence de la documentation BSA est rappelée sous
+chaque diamètre, et **tout champ qui s'en écarte passe en orange**.
+
+`Appliquer` relit le fichier ouvert et retrace la pièce sélectionnée
+immédiatement : l'effet de chaque réglage est donc visible tout de suite.
+`Réinitialiser` remet les valeurs BSA.
 
 ---
 

@@ -88,10 +88,16 @@ class BSAConvention:
 REGISTRY = {BSAConvention.name: BSAConvention()}
 DEFAULT = BSAConvention.name
 
+# Noms utilises par les versions precedentes, avant que la documentation BSA
+# et le fichier Archivage ne permettent de trancher. Ils pointent tous sur la
+# convention confirmee plutot que de faire echouer une ancienne configuration.
+LEGACY = {"feed_only", "feed_plus_retract", "vertex_feed", "vertex_total"}
+
 
 def get(name: str = DEFAULT):
-    try:
+    if name in REGISTRY:
         return REGISTRY[name]
-    except KeyError:
-        raise KeyError(f"convention '{name}' inconnue. Disponibles : "
-                       f"{sorted(REGISTRY)}") from None
+    if name in LEGACY or not name:
+        return REGISTRY[DEFAULT]
+    raise KeyError(f"convention '{name}' inconnue. Disponibles : "
+                   f"{sorted(REGISTRY)}")

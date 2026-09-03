@@ -17,9 +17,11 @@
     <span>tubeiso</span>
   </div>
   <div class="bar-actions">
+    <button id="browse" class="primary">Parcourir…</button>
+    <input id="file" type="file" accept=".xlsx,.xlsm,.stp,.step" hidden>
     <input id="path" type="text" spellcheck="false"
-           placeholder="Chemin d'un fichier LFT (.xlsx) ou d'un modèle (.stp)">
-    <button id="open" class="primary">Ouvrir</button>
+           placeholder="…ou collez un chemin : LFT (.xlsx) ou modèle (.stp)">
+    <button id="open">Ouvrir</button>
     <span class="sep"></span>
     <button id="exportOne">Exporter la pièce</button>
     <button id="exportAll">Tout exporter</button>
@@ -47,6 +49,20 @@
       <div id="hint" class="hint">Ouvrez un fichier LFT ou un STEP pour commencer.</div>
       <div id="spinner" class="spinner" hidden><i></i></div>
     </div>
+    <div id="simbar" class="toolbar sim" hidden>
+      <button id="simPlay" title="Lecture / pause">▶</button>
+      <button id="simReset" title="Revenir au tube droit">⟲</button>
+      <input id="simRange" type="range" min="0" max="1000" value="0">
+      <label class="speed">vitesse
+        <select id="simSpeed">
+          <option value="0.25">×0,25</option>
+          <option value="0.5" selected>×0,5</option>
+          <option value="1">×1</option>
+          <option value="2">×2</option>
+        </select>
+      </label>
+      <span id="simStep" class="readout"></span>
+    </div>
     <div class="toolbar">
       <div class="group">
         <button data-toggle="mesh" class="on" title="Solide">Solide</button>
@@ -58,6 +74,9 @@
       <div class="group">
         <button id="measure" title="Mesurer entre deux points">Mesurer</button>
         <button id="clearMeasure" title="Effacer les mesures">Effacer</button>
+      </div>
+      <div class="group">
+        <button id="simulate" title="Rejouer le cintrage pas à pas">Simuler</button>
       </div>
       <div class="group">
         <button data-view="iso">Iso</button>
@@ -76,10 +95,12 @@
       <button data-tab="dims" class="on">Cotations</button>
       <button data-tab="diag">Diagnostic</button>
       <button data-tab="prog">Programme</button>
+      <button data-tab="set">Réglages</button>
     </nav>
     <div id="tab-dims" class="tab on"></div>
     <div id="tab-diag" class="tab"></div>
     <div id="tab-prog" class="tab"></div>
+    <div id="tab-set" class="tab"></div>
   </aside>
 </main>
 

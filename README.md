@@ -63,6 +63,7 @@ Windows, macOS et Linux. Le serveur n'écoute que sur `127.0.0.1`.
 | `app/server.py` | API JSON : ouverture, géométrie, exports, diagnostic |
 | `app/launcher.py` | démarrage, fenêtre native ou navigateur |
 | `app/static/` | interface, three.js embarqué pour un fonctionnement hors ligne |
+| `app/static/simulation.js` | calcul du cintrage pas à pas, isolé et testé |
 
 ### Le lecteur STEP
 
@@ -207,3 +208,24 @@ cartouche porte alors la mention ERREUR.
 Écrire un parseur qui produit un `RawProgram`, et le brancher. Le reste de la
 chaîne est indépendant de la machine — c'est tout l'intérêt du pivot LRA, qui
 est le format standard de l'industrie du tube (aussi appelé YBC).
+
+
+## La simulation de cintrage
+
+Le bouton `Simuler` rejoue la fabrication : le tube part droit à sa longueur
+développée, puis chaque coude se forme dans l'ordre de la machine — rotation
+de l'axe B, puis pliage de l'axe C.
+
+Le calcul vit dans `app/static/simulation.js`, sans dépendance au DOM ni au
+rendu, précisément pour être vérifiable. `tests/test_simulation.mjs` le
+confronte à la géométrie Python, qui fait autorité :
+
+| Contrôle | Ce qu'il garantit |
+|---|---|
+| tube droit = développé | l'état initial est le bon flan |
+| longueur conservée à chaque image | aucun métal créé ni perdu pendant le pliage |
+| extrémité finale = géométrie Python | la simulation aboutit bien à la pièce réelle |
+| phases rotation puis cintrage | l'ordre des mouvements machine est respecté |
+
+La référence est régénérée par `tests/simulation_ref.py`, et les deux tests
+tournent dans la chaîne d'intégration à chaque poussée.

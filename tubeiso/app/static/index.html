@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tubeiso — Tubes cintrés Crippa</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M2 18h7a5 5 0 0 0 5-5V9a3 3 0 0 1 3-3h5" fill="none"
+            stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+    </svg>
+    <span>tubeiso</span>
+  </div>
+  <div class="bar-actions">
+    <input id="path" type="text" spellcheck="false"
+           placeholder="Chemin d'un fichier LFT (.xlsx) ou d'un modèle (.stp)">
+    <button id="open" class="primary">Ouvrir</button>
+    <span class="sep"></span>
+    <button id="exportOne">Exporter la pièce</button>
+    <button id="exportAll">Tout exporter</button>
+  </div>
+</header>
+
+<main>
+  <aside class="panel left">
+    <div class="panel-head">
+      <h2>Pièces</h2><span id="count" class="chip">0</span>
+    </div>
+    <input id="filter" type="search" placeholder="Filtrer…" spellcheck="false">
+    <ul id="list" class="list"></ul>
+    <div class="legend">
+      <span><i class="dot info"></i>conforme</span>
+      <span><i class="dot warn"></i>alerte</span>
+      <span><i class="dot err"></i>erreur</span>
+    </div>
+  </aside>
+
+  <section class="viewport">
+    <div id="canvas-wrap">
+      <canvas id="scene"></canvas>
+      <div id="labels"></div>
+      <div id="hint" class="hint">Ouvrez un fichier LFT ou un STEP pour commencer.</div>
+      <div id="spinner" class="spinner" hidden><i></i></div>
+    </div>
+    <div class="toolbar">
+      <div class="group">
+        <button data-toggle="mesh" class="on" title="Solide">Solide</button>
+        <button data-toggle="wire" title="Filaire">Filaire</button>
+        <button data-toggle="axis" class="on" title="Fibre neutre">Axe</button>
+        <button data-toggle="nodes" class="on" title="Points de tangence">Points</button>
+        <button data-toggle="dims" class="on" title="Cotations">Cotations</button>
+      </div>
+      <div class="group">
+        <button id="measure" title="Mesurer entre deux points">Mesurer</button>
+        <button id="clearMeasure" title="Effacer les mesures">Effacer</button>
+      </div>
+      <div class="group">
+        <button data-view="iso">Iso</button>
+        <button data-view="x">X</button>
+        <button data-view="y">Y</button>
+        <button data-view="z">Z</button>
+        <button id="fit">Recadrer</button>
+      </div>
+      <div class="grow"></div>
+      <div id="readout" class="readout"></div>
+    </div>
+  </section>
+
+  <aside class="panel right">
+    <nav class="tabs">
+      <button data-tab="dims" class="on">Cotations</button>
+      <button data-tab="diag">Diagnostic</button>
+      <button data-tab="prog">Programme</button>
+    </nav>
+    <div id="tab-dims" class="tab on"></div>
+    <div id="tab-diag" class="tab"></div>
+    <div id="tab-prog" class="tab"></div>
+  </aside>
+</main>
+
+<footer class="status">
+  <span id="status">Prêt.</span>
+  <span class="grow"></span>
+  <span id="cad" class="chip"></span>
+</footer>
+
+<dialog id="exportDlg">
+  <form method="dialog">
+    <h3>Exporter</h3>
+    <label>Dossier de destination
+      <input id="outDir" type="text" value="." spellcheck="false"></label>
+    <fieldset>
+      <legend>Formats</legend>
+      <label><input type="checkbox" value="step" checked> STEP AP214 <em>— livrable sous-traitance</em></label>
+      <label><input type="checkbox" value="stl"> STL <em>— visualisation</em></label>
+      <label><input type="checkbox" value="svg"> Plan A4 <em>— contrôle</em></label>
+      <label><input type="checkbox" value="dxf"> DXF <em>— reprise CAO</em></label>
+    </fieldset>
+    <menu>
+      <button value="cancel">Annuler</button>
+      <button id="doExport" value="ok" class="primary">Exporter</button>
+    </menu>
+  </form>
+</dialog>
+
+<script type="importmap">
+{"imports": {"three": "./vendor/three.module.min.js"}}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

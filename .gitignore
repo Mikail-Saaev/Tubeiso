@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+tooling.json
+mes_plans/
+modeles_3d/
+plans/
+*.xlsx
+!exemple_*.xlsx

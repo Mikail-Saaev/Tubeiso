@@ -1,0 +1,8 @@
+numpy>=1.24
+openpyxl>=3.1
+ezdxf>=1.1
+
+# Noyau CAO OpenCascade, requis pour la commande `model` (exports STEP/STL).
+# Paquet volumineux (~300 Mo). Les commandes inspect / calibrate / plan
+# fonctionnent sans lui.
+cadquery>=2.5

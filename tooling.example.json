@@ -1,0 +1,60 @@
+{
+  "_source": "FORMATION_CRIPPA_002 p.4 et archivage_crippa_EDT_09_1.xlsm Feuil2",
+  "convention": "bsa",
+  "handedness": 1,
+  "length_tolerance": 1.0,
+  "tooling": {
+    "Ø4": {
+      "diameter": 4.0,
+      "clr": 11.0,
+      "wall": 0.75,
+      "material": "Tube Ermeto zingue 4/2.5",
+      "elongation": 3.0,
+      "min_straight": 7.0,
+      "max_angle": 184.0
+    },
+    "Ø6": {
+      "diameter": 6.0,
+      "clr": 11.0,
+      "wall": 1.0,
+      "material": "Tube Ermeto zingue 6/4",
+      "elongation": 5.0,
+      "min_straight": 11.0,
+      "max_angle": 184.0
+    },
+    "Ø8": {
+      "diameter": 8.0,
+      "clr": 14.0,
+      "wall": 1.0,
+      "material": "Tube Ermeto zingue 8/6",
+      "elongation": 5.0,
+      "min_straight": 15.0,
+      "max_angle": 184.0
+    },
+    "Ø10": {
+      "diameter": 10.0,
+      "clr": 23.0,
+      "wall": 1.0,
+      "material": "Tube Ermeto zingue 10/8",
+      "elongation": 5.0,
+      "min_straight": 20.0,
+      "max_angle": 184.0
+    },
+    "Ø12": {
+      "diameter": 12.0,
+      "clr": 30.0,
+      "wall": 1.5,
+      "material": "Tube Ermeto zingue 12/9",
+      "elongation": 5.0,
+      "min_straight": 24.0,
+      "max_angle": 184.0
+    }
+  },
+  "code_mat_to_tooling": {
+    "293-421-006": "Ø6",
+    "293-421-008": "Ø8",
+    "416-421-004": "Ø4",
+    "293-421-010": "Ø10",
+    "293-422-012": "Ø12"
+  }
+}

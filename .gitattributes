@@ -1,0 +1,13 @@
+# Force les fins de ligne Unix a la recuperation du code, y compris sous
+# Windows. Sans cela, le runner Windows convertit en CRLF et les blocs bash
+# des workflows echouent avec un code 127 : le \r invisible en fin de ligne
+# est interprete comme faisant partie du nom de la commande.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.png binary
+*.xlsx binary
+*.xlsm binary
+*.docx binary
+*.stp binary
+*.dxf binary

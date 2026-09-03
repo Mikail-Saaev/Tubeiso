@@ -48,11 +48,7 @@ jobs:
           python-version: '3.12'
 
       - name: Environnement
-        shell: bash
-        run: |
-          python --version
-          python -c "import platform, sys; print(platform.platform()); print(sys.executable)"
-          python -m pip --version
+        run: python -c "import platform, sys; print(sys.version); print(platform.platform())"
 
       - name: Mettre a jour pip
         run: python -m pip install --upgrade pip setuptools wheel
@@ -67,13 +63,7 @@ jobs:
         run: python -m pip install "pyinstaller>=6.6"
 
       - name: Verifier que le noyau CAO se charge
-        shell: bash
-        run: |
-          python - <<'PY'
-          import cadquery as cq
-          from OCP.STEPControl import STEPControl_Writer
-          print("cadquery", cq.__version__, "- OCP charge")
-          PY
+        run: python tools/check_cad.py
 
       - name: Lancer les tests
         shell: bash
@@ -82,26 +72,21 @@ jobs:
       - name: Construire l'executable
         run: pyinstaller tubeiso.spec --noconfirm --clean
 
-      - name: Verifier que le binaire demarre
-        shell: bash
-        run: |
-          cd dist/tubeiso
-          if [ "${{ matrix.name }}" = "windows" ]; then ./tubeiso.exe --help; else ./tubeiso --help; fi
+      - name: Verifier que le binaire demarre (Windows)
+        if: matrix.name == 'windows'
+        run: dist\tubeiso\tubeiso.exe --help
 
-      - name: Mesurer le paquet
-        shell: bash
-        run: du -sh dist/tubeiso || true
+      - name: Verifier que le binaire demarre (Unix)
+        if: matrix.name != 'windows'
+        run: ./dist/tubeiso/tubeiso --help
 
-      - name: Archiver
-        shell: bash
-        run: |
-          cd dist
-          if [ "${{ matrix.name }}" = "windows" ]; then
-            powershell -c "Compress-Archive -Path tubeiso -DestinationPath ${{ matrix.archive }}"
-          else
-            zip -qr ${{ matrix.archive }} tubeiso
-          fi
-          ls -la ${{ matrix.archive }}
+      - name: Archiver (Windows)
+        if: matrix.name == 'windows'
+        run: Compress-Archive -Path dist\tubeiso -DestinationPath dist\${{ matrix.archive }}
+
+      - name: Archiver (Unix)
+        if: matrix.name != 'windows'
+        run: cd dist && zip -qr ${{ matrix.archive }} tubeiso && ls -la ${{ matrix.archive }}
 
       - name: Publier l'artefact
         uses: actions/upload-artifact@v4

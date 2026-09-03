@@ -1,6 +1,8 @@
 """Tests d'invariants. L'essentiel : un aller-retour LRA -> 3D -> developpe."""
 import math
+import os
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -140,9 +142,30 @@ def test_solid_is_watertight():
     assert abs(rep["volume_mm3"] - attendu) / attendu < 0.01
 
 
-if __name__ == "__main__":
+def _run() -> int:
+    echecs = 0
     for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
+        if not name.startswith("test_"):
+            continue
+        try:
             fn()
+        except Exception as exc:                       # noqa: BLE001
+            echecs += 1
+            print(f"ECHEC  {name} : {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+        else:
             print(f"ok  {name}")
-    print("\nTous les tests passent.")
+    print("\nTous les tests passent." if not echecs
+          else f"\n{echecs} test(s) en echec.")
+    return 1 if echecs else 0
+
+
+if __name__ == "__main__":
+    code = _run()
+    # Sortie immediate, sans passer par la fermeture de l'interpreteur.
+    # OpenCascade et VTK liberent leurs ressources natives a ce moment-la et
+    # y plantent parfois, ce qui renvoie un code non nul malgre des tests
+    # tous verts. Le symptome a ete observe sur les runners GitHub.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

@@ -1,10 +1,8 @@
 # Fabrique automatiquement l'executable pour Windows, macOS et Linux.
 #
-# Deposez ce projet sur GitHub : a chaque poussee, ce workflow construit les
-# trois binaires et les met a disposition en telechargement dans l'onglet
-# Actions. Aucun outil a installer sur votre poste.
-#
-# Un tag `v1.0.0` cree en plus une Release publique avec les archives.
+# Chaque etape est isolee pour qu'un echec designe immediatement sa cause.
+# Windows est le travail principal ; macOS est tolerant a l'echec, car les
+# roues du noyau CAO n'existent pas toujours pour son processeur ARM.
 
 name: build
 
@@ -23,37 +21,62 @@ jobs:
           - os: windows-latest
             name: windows
             archive: tubeiso-windows.zip
-          - os: macos-latest
-            name: macos
-            archive: tubeiso-macos.zip
+            optional: false
           - os: ubuntu-latest
             name: linux
             archive: tubeiso-linux.zip
+            optional: false
+          - os: macos-latest
+            name: macos
+            archive: tubeiso-macos.zip
+            optional: true
 
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional }}
     timeout-minutes: 90
 
-    # Necessaire pour que l'etape "Publier la release" puisse ecrire.
-    # Sans cela, elle echoue avec une erreur 403 sur les depots recents,
-    # ou le jeton par defaut est en lecture seule.
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Recuperer le code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Installer Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: pip
+          python-version: '3.12'
 
-      - name: Installer les dependances
+      - name: Environnement
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python --version
+          python -c "import platform, sys; print(platform.platform()); print(sys.executable)"
+          python -m pip --version
 
-      - name: Verifier les tests
+      - name: Mettre a jour pip
+        run: python -m pip install --upgrade pip setuptools wheel
+
+      - name: Installer numpy, openpyxl, ezdxf
+        run: python -m pip install "numpy>=1.24" "openpyxl>=3.1" "ezdxf>=1.1" "flask>=3.0"
+
+      - name: Installer le noyau CAO
+        run: python -m pip install "cadquery==2.8.0"
+
+      - name: Installer PyInstaller
+        run: python -m pip install "pyinstaller>=6.6"
+
+      - name: Verifier que le noyau CAO se charge
+        shell: bash
+        run: |
+          python - <<'PY'
+          import cadquery as cq
+          from OCP.STEPControl import STEPControl_Writer
+          print("cadquery", cq.__version__, "- OCP charge")
+          PY
+
+      - name: Lancer les tests
+        shell: bash
         run: python tests/test_tubeiso.py
 
       - name: Construire l'executable
@@ -63,8 +86,11 @@ jobs:
         shell: bash
         run: |
           cd dist/tubeiso
-          if [ "${{ matrix.name }}" = "windows" ]; then BIN=./tubeiso.exe; else BIN=./tubeiso; fi
-          "$BIN" --help
+          if [ "${{ matrix.name }}" = "windows" ]; then ./tubeiso.exe --help; else ./tubeiso --help; fi
+
+      - name: Mesurer le paquet
+        shell: bash
+        run: du -sh dist/tubeiso || true
 
       - name: Archiver
         shell: bash
@@ -75,13 +101,15 @@ jobs:
           else
             zip -qr ${{ matrix.archive }} tubeiso
           fi
+          ls -la ${{ matrix.archive }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
           path: dist/${{ matrix.archive }}
           retention-days: 14
-          compression-level: 0   # l'archive est deja compressee
+          compression-level: 0
 
       - name: Publier la release
         if: startsWith(github.ref, 'refs/tags/v')

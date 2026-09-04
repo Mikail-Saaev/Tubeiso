@@ -6,11 +6,20 @@ WebGL du navigateur est deja installe partout), evite tout probleme de pilote
 OpenGL ou de contexte graphique, et rend l'application identique sous Windows,
 macOS et Linux.
 
-Le serveur n'ecoute que sur 127.0.0.1 et tire un jeton aleatoire au demarrage :
-rien n'est expose sur le reseau.
+Le serveur n'ecoute que sur 127.0.0.1 : rien n'est expose sur le reseau.
+
+Deux notions distinctes, et jamais melangees dans l'API :
+
+    lot / LISTE   le numero de LFT           0792-0002-JV
+    programme     le numero de programme     792_JV-412
+
+Une piece est identifiee par un `uid` stable, et non par son repere : le meme
+repere peut exister dans deux lots differents du meme fichier.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 import shutil
 import sys
@@ -21,88 +30,176 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from .. import bsa, conventions, geometry, render, solid, stepreader, validate
-from ..config import Config, read_lft
+from .. import bsa, conventions, geometry, lft, render, solid, stepreader, validate
+from ..config import Config, code_mat_diameter
 from ..parsers import crippa
 
 STATIC = Path(__file__).with_name("static")
+MESH_CACHE_MAX = 24          # pieces gardees en memoire, maillage compris
+
+
+class Piece:
+    """Une piece prete a servir : donnees LFT, programme, geometrie, controles."""
+
+    def __init__(self, uid: str, record: lft.TubeRecord, lot: str):
+        self.uid = uid
+        self.record = record
+        self.lot = lot
+        self.raw: crippa.RawProgram | None = None
+        self.tube = None
+        self.tooling = None
+        self.recut = 0.0
+        self.issues: list = []
+
+    @property
+    def ref(self) -> str:
+        return self.record.rep or self.record.program_number or self.uid
 
 
 class Session:
     """Etat courant : le fichier ouvert et les pieces qu'il contient."""
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.config = Config.load(None)
         self.source: Path | None = None
-        self.tubes: dict[str, dict] = {}
+        self.book: lft.Workbook | None = None
+        self.pieces: dict[str, Piece] = {}
         self.workdir = tempfile.mkdtemp(prefix="tubeiso-")
+        self._cache: dict[tuple, dict] = {}
 
     def cleanup(self) -> None:
         shutil.rmtree(self.workdir, ignore_errors=True)
 
-    # ------------------------------------------------------------ chargement
-    def open_lft(self, path: str, column: str = "PROGCRIPPA") -> dict:
-        p = Path(path).expanduser()
-        if not p.exists():
-            raise FileNotFoundError(f"fichier introuvable : {p}")
-        rows = read_lft(p, column)
-        conv = conventions.get(self.config.convention)
-        tubes: dict[str, dict] = {}
+    # ------------------------------------------------------------- invalidation
+    @property
+    def config_key(self) -> str:
+        blob = json.dumps(self.config.data, sort_keys=True, default=str)
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
-        for row in rows:
-            raw = crippa.parse(str(row["iso"]), ref=row["ref"])
-            raw.name = raw.name or row["ref"]
-            if raw.declared_length is None and row["length"]:
-                raw.declared_length = float(row["length"])
-            tooling = self.config.for_program(raw.tooling, raw.diameter,
-                                              row["code_mat"])
-            recut = float(row.get("recut") or raw.recut or 0.0)
-            tube = conv.build(raw, tooling, recut=recut)
-            issues = validate.check(tube, tooling, recut=recut,
-                                    length_tol=self.config.tolerance)
-            tubes[tube.ref] = {
-                "raw": raw, "tube": tube, "tooling": tooling,
-                "recut": recut, "issues": issues, "row": row,
-            }
+    def invalidate(self) -> None:
+        self._cache.clear()
+
+    # ------------------------------------------------------------ chargement
+    def open_lft(self, path: str, sheet: str | None = None) -> dict:
+        book = lft.read(path, sheet)
+        pieces: dict[str, Piece] = {}
+        for i, lot in enumerate(book.lots):
+            for j, rec in enumerate(lot.tubes):
+                uid = f"{i}-{j}"
+                pieces[uid] = Piece(uid, rec, lot.number)
 
         with self.lock:
-            self.source, self.tubes = p, tubes
+            self.source = Path(path)
+            self.book = book
+            self.pieces = pieces
+            self.invalidate()
+            for p in pieces.values():
+                self._build(p)
         return self.summary()
 
+    def _build(self, p: Piece) -> None:
+        """Programme -> geometrie -> controles, pour une piece."""
+        rec = p.record
+        conv = conventions.get(self.config.convention)
+        diameter = code_mat_diameter(rec.get("CODE_MAT"))
+        lft_length = rec.number("LONGUEUR")
+
+        if rec.straight or not rec.iso.strip():
+            tooling = self.config.for_program("", diameter, rec.get("CODE_MAT"))
+            length = lft_length or 0.0
+            p.raw = crippa.parse("", ref=p.ref)
+            p.tube = conv.build_straight(p.ref, length, diameter or tooling.diameter,
+                                         tooling)
+            p.recut = rec.recut
+        else:
+            raw = crippa.parse(rec.iso, ref=p.ref)
+            raw.name = raw.name or p.ref
+            if raw.declared_length is None and lft_length:
+                raw.declared_length = float(lft_length)
+            if raw.diameter is None and diameter:
+                raw.diameter = float(diameter)
+            tooling = self.config.for_program(raw.tooling, raw.diameter,
+                                              rec.get("CODE_MAT"))
+            p.recut = rec.recut or float(raw.recut or 0.0)
+            p.raw = raw
+            p.tube = conv.build(raw, tooling, recut=p.recut,
+                                angle_mode=self.config.angle_mode)
+
+        p.tube.ref = p.ref
+        p.tube.list_number = rec.list_number
+        p.tube.program_number = rec.program_number
+        p.tooling = tooling
+        p.tube.warnings.extend(rec.warnings)
+        p.issues = validate.check(p.tube, tooling, recut=p.recut,
+                                  length_tol=self.config.tolerance,
+                                  lft_length=lft_length)
+
+    def rebuild(self) -> dict:
+        """Rejoue tout le fichier avec la configuration courante."""
+        with self.lock:
+            self.invalidate()
+            for p in self.pieces.values():
+                self._build(p)
+        return self.summary()
+
+    # --------------------------------------------------------------- resume
     def summary(self) -> dict:
-        items = []
-        for ref, e in self.tubes.items():
-            t, raw = e["tube"], e["raw"]
-            items.append({
-                "ref": ref,
-                "diameter": t.diameter,
-                "tooling": raw.tooling,
-                "head": bsa.HEAD_NAMES.get(raw.head, "-"),
-                "machine": raw.machine,
-                "declared": t.declared_length,
-                "bends": t.n_bends,
-                "recut": e["recut"],
-                "complete": t.complete,
-                "status": validate.worst(e["issues"]),
-                "issues": [{"level": i.level, "code": i.code,
-                            "message": i.message, "source": i.source}
-                           for i in e["issues"]],
-            })
-        items.sort(key=lambda x: x["ref"])
-        return {"source": str(self.source) if self.source else None,
-                "count": len(items), "tubes": items}
+        lots = []
+        for lot in (self.book.lots if self.book else []):
+            items = []
+            for p in self.pieces.values():
+                if p.lot != lot.number:
+                    continue
+                t, raw = p.tube, p.raw
+                items.append({
+                    "uid": p.uid,
+                    "ref": p.ref,
+                    "lot": p.lot,
+                    "programme": p.record.program_number,
+                    "liste": p.record.list_number,
+                    "diameter": t.diameter,
+                    "tooling": raw.tooling if raw else "",
+                    "head": bsa.HEAD_NAMES.get(raw.head if raw else None, "—"),
+                    "declared": t.declared_length,
+                    "bends": t.n_bends,
+                    "recut": p.recut,
+                    "complete": t.complete,
+                    "straight": t.straight,
+                    "rows": len(p.record.rows),
+                    "status": validate.worst(p.issues),
+                })
+            lots.append({"number": lot.number, "label": lot.label,
+                         "count": len(items), "tubes": items})
+        return {
+            "source": str(self.source) if self.source else None,
+            "sheets": self.book.sheets_read if self.book else [],
+            "columns": self.book.columns if self.book else [],
+            "warnings": self.book.warnings if self.book else [],
+            "lots": lots,
+            "count": sum(l["count"] for l in lots),
+        }
 
     # -------------------------------------------------------------- geometrie
-    def detail(self, ref: str, deflection: float = 0.04) -> dict:
-        e = self.tubes.get(ref)
-        if e is None:
-            raise KeyError(f"repere {ref} inconnu")
-        tube, tooling = e["tube"], e["tooling"]
+    def detail(self, uid: str, deflection: float = 0.04) -> dict:
+        p = self.pieces.get(uid)
+        if p is None:
+            raise KeyError(f"piece {uid} inconnue")
+        key = (uid, round(deflection, 4), self.config_key)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        data = self._detail(p, deflection)
+        if len(self._cache) >= MESH_CACHE_MAX:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = data
+        return data
+
+    def _detail(self, p: Piece, deflection: float) -> dict:
+        tube, tooling = p.tube, p.tooling
         cl = geometry.build(tube, handedness=self.config.handedness)
 
-        mesh = None
-        mesh_error = None
+        mesh = mesh_error = None
         try:
             shp = solid.build_solid(tube, cl, tooling.wall)
             mesh = stepreader.tessellate(shp, deflection)
@@ -110,87 +207,121 @@ class Session:
             mesh_error = str(exc)
 
         prims = [{
-            "kind": p.kind,
-            "start": [round(float(v), 4) for v in p.start],
-            "end": [round(float(v), 4) for v in p.end],
-            "mid": None if p.mid is None else [round(float(v), 4) for v in p.mid],
-            "centre": None if p.centre is None else [round(float(v), 4) for v in p.centre],
-            "radius": round(p.radius, 4),
-            "angle": round(p.angle, 4),
-            "length": round(p.length, 4),
-        } for p in cl.primitives]
+            "kind": pr.kind,
+            "start": [round(float(v), 4) for v in pr.start],
+            "end": [round(float(v), 4) for v in pr.end],
+            "mid": None if pr.mid is None else [round(float(v), 4) for v in pr.mid],
+            "centre": None if pr.centre is None else [round(float(v), 4) for v in pr.centre],
+            "radius": round(pr.radius, 4),
+            "angle": round(pr.angle, 4),
+            "length": round(pr.length, 4),
+        } for pr in cl.primitives]
+
+        bends = [{"angle": round(b.angle, 4), "r15": b.r15,
+                  "springback": round(b.springback, 4),
+                  "rotation": b.rotation, "clr": b.clr} for b in tube.bends]
 
         return {
-            "ref": ref,
+            "uid": p.uid,
+            "ref": p.ref,
+            "lot": p.lot,
+            "programme": p.record.program_number,
+            "liste": p.record.list_number,
             "diameter": tube.diameter,
             "wall": tooling.wall,
             "material": tooling.material,
             "bend_radius": tooling.clr,
-            "tooling": e["raw"].tooling,
-            "head": bsa.HEAD_NAMES.get(e["raw"].head, "-"),
+            "tooling": p.raw.tooling if p.raw else "",
+            "head": bsa.HEAD_NAMES.get(p.raw.head if p.raw else None, "—"),
             "comment": tube.comment,
             "source": tube.source,
             "declared": tube.declared_length,
-            "recut": e["recut"],
+            "ds": tube.ds,
+            "recut": p.recut,
+            "straight": tube.straight,
+            "angle_mode": tube.angle_mode,
             "developed": round(cl.developed, 4),
             "straights": [round(s, 4) for s in tube.straights],
-            "bends": [{"angle": b.angle, "rotation": b.rotation,
-                       "clr": b.clr} for b in tube.bends],
+            "bends": bends,
             "primitives": prims,
-            "polyline": [[round(float(v), 4) for v in p] for p in cl.points],
-            "vertices": [[round(float(v), 4) for v in p] for p in cl.vertices],
-            "tangents": [[round(float(v), 4) for v in p] for p in cl.tangent_points],
-            "bbox": {"size": [round(float(v), 3) for v in cl.envelope]},
+            "polyline": [[round(float(v), 4) for v in q] for q in cl.points],
+            "vertices": [[round(float(v), 4) for v in q] for q in cl.vertices],
+            "tangents": [[round(float(v), 4) for v in q] for q in cl.tangent_points],
+            "bbox": {"size": [round(float(v), 3) for v in cl.envelope],
+                     "min": [round(float(v), 3) for v in cl.bbox[0]],
+                     "max": [round(float(v), 3) for v in cl.bbox[1]]},
             "mesh": mesh,
             "mesh_error": mesh_error,
             "issues": [{"level": i.level, "code": i.code, "message": i.message,
-                        "source": i.source} for i in e["issues"]],
-            "status": validate.worst(e["issues"]),
-            # De quoi rejouer le cintrage pas a pas dans le navigateur :
-            # les memes donnees que celles qui ont servi a construire la piece.
+                        "source": i.source} for i in p.issues],
+            "status": validate.worst(p.issues),
+            "fields": self.fields(p),
             "simulation": {
                 "straights": [round(v, 4) for v in tube.straights],
-                "bends": [{"angle": b.angle, "rotation": b.rotation,
-                           "clr": b.clr} for b in tube.bends],
+                "bends": bends,
                 "handedness": self.config.handedness,
                 "blank_length": round(cl.developed, 3),
+                "cut_length": tube.declared_length,
             },
         }
 
+    def fields(self, p: Piece) -> list[dict]:
+        """Toutes les colonnes de la LFT pour cette piece, sans exception.
+
+        C'est la garantie qu'aucune information de l'Excel n'est perdue :
+        l'interface les affiche telles quelles, y compris les colonnes que
+        l'application n'exploite pas.
+        """
+        out = []
+        for col, f in p.record.fields.items():
+            out.append({
+                "column": col,
+                "values": [str(v) for v in f.values],
+                "rows": f.rows,
+                "conflict": f.conflicting,
+            })
+        out.sort(key=lambda x: x["column"])
+        return out
+
     # ---------------------------------------------------------------- exports
-    def export(self, refs: list[str], out_dir: str, formats: list[str]) -> dict:
+    def export(self, uids: list[str], out_dir: str, formats: list[str]) -> dict:
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
         done, failed = [], []
-        for ref in refs:
-            e = self.tubes.get(ref)
-            if e is None:
-                failed.append({"ref": ref, "error": "repere inconnu"})
+        for uid in uids:
+            p = self.pieces.get(uid)
+            if p is None:
+                failed.append({"ref": uid, "error": "piece inconnue"})
                 continue
-            tube, tooling = e["tube"], e["tooling"]
+            # deux lots peuvent porter le meme repere : le nom de fichier doit
+            # rester unique, donc on prefixe par le lot quand il y en a plusieurs
+            name = p.ref
+            if self.book and len(self.book.lots) > 1 and p.lot:
+                name = f"{p.lot}_{p.ref}"
             try:
-                cl = geometry.build(tube, handedness=self.config.handedness)
+                cl = geometry.build(p.tube, handedness=self.config.handedness)
                 cad = [f for f in formats if f in ("step", "stl", "brep")]
                 if cad:
-                    for f in solid.export(tube, cl, out, tooling, cad):
+                    for f in solid.export(p.tube, cl, out, p.tooling, cad,
+                                          basename=name):
                         done.append(str(f))
                 if "svg" in formats:
-                    p = out / f"{ref}.svg"
-                    p.write_text(render.to_svg(tube, cl, tooling, e["issues"]),
+                    q = out / f"{name}.svg"
+                    q.write_text(render.to_svg(p.tube, cl, p.tooling, p.issues),
                                  encoding="utf-8")
-                    done.append(str(p))
+                    done.append(str(q))
                 if "dxf" in formats:
-                    render.to_dxf(tube, cl, str(out / f"{ref}.dxf"))
-                    done.append(str(out / f"{ref}.dxf"))
+                    render.to_dxf(p.tube, cl, str(out / f"{name}.dxf"))
+                    done.append(str(out / f"{name}.dxf"))
             except Exception as exc:
-                failed.append({"ref": ref, "error": str(exc)})
+                failed.append({"ref": p.ref, "error": str(exc)})
         return {"written": done, "failed": failed, "dir": str(out)}
 
 
 def create_app(session: Session | None = None, token: str | None = None) -> Flask:
     app = Flask(__name__, static_folder=None)
     # Flask trie les cles JSON par defaut, ce qui renverrait les outillages
-    # dans l'ordre alphabetique : O10, O12, O15... avant O4. On conserve
+    # dans l'ordre alphabetique : Ø10, Ø12, Ø15... avant Ø4. On conserve
     # l'ordre d'insertion, qui est l'ordre croissant des diametres.
     app.json.sort_keys = False
     app.config["SESSION"] = session or Session()
@@ -238,7 +369,7 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
             "cad": _cad_available(),
             "cad_error": _cad_error(),
             "source": str(s.source) if s.source else None,
-            "count": len(s.tubes),
+            "count": len(s.pieces),
             "diameters": sorted(bsa.RM),
         })
 
@@ -248,15 +379,13 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
 
         Le navigateur ne communique jamais le chemin reel d'un fichier, pour
         des raisons de confidentialite. On recupere donc son contenu, on
-        l'ecrit dans un dossier temporaire, et on traite ce fichier-la. Cela
-        fonctionne aussi bien en fenetre native que dans un onglet.
+        l'ecrit dans un dossier temporaire, et on traite ce fichier-la.
         """
         s: Session = app.config["SESSION"]
         f = request.files.get("file")
         if f is None or not f.filename:
             return api_error(ValueError("aucun fichier recu"))
-        safe = Path(f.filename).name
-        target = Path(s.workdir) / safe
+        target = Path(s.workdir) / Path(f.filename).name
         f.save(target)
         try:
             if target.suffix.lower() in (".stp", ".step"):
@@ -273,14 +402,18 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
         return jsonify({
             "config": s.config.data,
             "conventions": sorted(conventions.REGISTRY),
+            "angle_modes": list(bsa.ANGLE_MODES),
             "reference": {
                 "rm": bsa.RM,
+                "wall": bsa.WALL,
                 "elongation": bsa.ELONGATION_PCT,
                 "elasticity": bsa.ELASTICITY_PCT,
+                "r15_for_90": bsa.R15_FOR_90,
                 "min_straight": bsa.MIN_STRAIGHT,
                 "min_last": bsa.MIN_LAST,
                 "min_last_two": bsa.MIN_LAST_TWO,
                 "max_last": bsa.MAX_LAST,
+                "max_angle": bsa.MAX_BEND_ANGLE,
                 "developed": [bsa.MIN_DEVELOPED, bsa.RECOMMENDED_DEVELOPED,
                               bsa.MAX_DEVELOPED],
             },
@@ -296,26 +429,25 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
         try:
             s.config = Config(data)
             conventions.get(s.config.convention)      # valide le nom
-            reloaded = s.open_lft(str(s.source)) if s.source else {"tubes": []}
-            return jsonify({"ok": True, "reloaded": reloaded})
+            return jsonify({"ok": True, "reloaded": s.rebuild()})
         except Exception as exc:
             s.config = previous
+            s.invalidate()
             return api_error(exc)
 
     @app.post("/api/settings/reset")
     def reset_settings():
         s: Session = app.config["SESSION"]
         s.config = Config.load(None)
-        reloaded = s.open_lft(str(s.source)) if s.source else {"tubes": []}
-        return jsonify({"ok": True, "config": s.config.data, "reloaded": reloaded})
+        return jsonify({"ok": True, "config": s.config.data,
+                        "reloaded": s.rebuild()})
 
     @app.post("/api/open")
     def open_file():
         s: Session = app.config["SESSION"]
         data = request.get_json(force=True, silent=True) or {}
         try:
-            return jsonify(s.open_lft(data.get("path", ""),
-                                      data.get("column", "PROGCRIPPA")))
+            return jsonify(s.open_lft(data.get("path", ""), data.get("sheet")))
         except Exception as exc:
             return api_error(exc)
 
@@ -323,12 +455,12 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
     def tubes():
         return jsonify(app.config["SESSION"].summary())
 
-    @app.get("/api/tube/<ref>")
-    def tube_detail(ref: str):
+    @app.get("/api/tube/<uid>")
+    def tube_detail(uid: str):
         s: Session = app.config["SESSION"]
         try:
             defl = float(request.args.get("deflection", 0.04))
-            return jsonify(s.detail(ref, defl))
+            return jsonify(s.detail(uid, defl))
         except KeyError as exc:
             return api_error(exc, 404)
         except Exception as exc:
@@ -348,26 +480,9 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
         s: Session = app.config["SESSION"]
         data = request.get_json(force=True, silent=True) or {}
         try:
-            return jsonify(s.export(data.get("refs") or list(s.tubes),
+            return jsonify(s.export(data.get("uids") or list(s.pieces),
                                     data.get("dir") or ".",
                                     data.get("formats") or ["step"]))
-        except Exception as exc:
-            return api_error(exc)
-
-    @app.get("/api/tooling")
-    def get_tooling():
-        s: Session = app.config["SESSION"]
-        return jsonify(s.config.data)
-
-    @app.post("/api/tooling")
-    def set_tooling():
-        s: Session = app.config["SESSION"]
-        data = request.get_json(force=True, silent=True) or {}
-        try:
-            s.config = Config(data)
-            if s.source:
-                return jsonify(s.open_lft(str(s.source)))
-            return jsonify({"ok": True})
         except Exception as exc:
             return api_error(exc)
 

@@ -1,6 +1,7 @@
 {
-  "_source": "FORMATION_CRIPPA_002 p.4 et archivage_crippa_EDT_09_1.xlsm Feuil2",
+  "_source": "FORMATION_CRIPPA_002 p.4, 5.4, 8.1.1 et archivage_crippa_EDT_09_1.xlsm Feuil2",
   "convention": "bsa",
+  "angle_mode": "entier",
   "handedness": 1,
   "length_tolerance": 1.0,
   "tooling": {
@@ -10,8 +11,8 @@
       "wall": 0.75,
       "material": "Tube Ermeto zingue 4/2.5",
       "elongation": 3.0,
-      "min_straight": 7.0,
-      "max_angle": 184.0
+      "min_straight": 7,
+      "max_angle": 188.0
     },
     "Ø6": {
       "diameter": 6.0,
@@ -19,8 +20,8 @@
       "wall": 1.0,
       "material": "Tube Ermeto zingue 6/4",
       "elongation": 5.0,
-      "min_straight": 11.0,
-      "max_angle": 184.0
+      "min_straight": 11,
+      "max_angle": 188.0
     },
     "Ø8": {
       "diameter": 8.0,
@@ -28,8 +29,8 @@
       "wall": 1.0,
       "material": "Tube Ermeto zingue 8/6",
       "elongation": 5.0,
-      "min_straight": 15.0,
-      "max_angle": 184.0
+      "min_straight": 15,
+      "max_angle": 188.0
     },
     "Ø10": {
       "diameter": 10.0,
@@ -37,8 +38,8 @@
       "wall": 1.0,
       "material": "Tube Ermeto zingue 10/8",
       "elongation": 5.0,
-      "min_straight": 20.0,
-      "max_angle": 184.0
+      "min_straight": 20,
+      "max_angle": 188.0
     },
     "Ø12": {
       "diameter": 12.0,
@@ -46,15 +47,54 @@
       "wall": 1.5,
       "material": "Tube Ermeto zingue 12/9",
       "elongation": 5.0,
-      "min_straight": 24.0,
-      "max_angle": 184.0
+      "min_straight": 24,
+      "max_angle": 188.0
+    },
+    "Ø15": {
+      "diameter": 15.0,
+      "clr": 45.0,
+      "wall": 1.5,
+      "material": "Tube Ermeto zingue 15/12",
+      "elongation": 4.0,
+      "min_straight": 30,
+      "max_angle": 188.0
+    },
+    "Ø16": {
+      "diameter": 16.0,
+      "clr": 45.0,
+      "wall": 1.5,
+      "material": "Tube Ermeto zingue 16/13",
+      "elongation": 4.0,
+      "min_straight": 30,
+      "max_angle": 188.0
+    },
+    "Ø18": {
+      "diameter": 18.0,
+      "clr": 52.0,
+      "wall": 2.0,
+      "material": "Tube Ermeto zingue 18/14",
+      "elongation": 4.0,
+      "min_straight": 36,
+      "max_angle": 188.0
+    },
+    "Ø22": {
+      "diameter": 22.0,
+      "clr": 86.0,
+      "wall": 2.5,
+      "material": "Tube Ermeto zingue 22/17",
+      "elongation": 0.0,
+      "min_straight": null,
+      "max_angle": 188.0
     }
   },
   "code_mat_to_tooling": {
+    "416-421-004": "Ø4",
     "293-421-006": "Ø6",
     "293-421-008": "Ø8",
-    "416-421-004": "Ø4",
     "293-421-010": "Ø10",
-    "293-422-012": "Ø12"
+    "293-422-012": "Ø12",
+    "293-421-015": "Ø15",
+    "293-421-016": "Ø16",
+    "293-421-018": "Ø18"
   }
 }

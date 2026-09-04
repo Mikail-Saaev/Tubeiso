@@ -12,8 +12,13 @@ from dataclasses import dataclass, field
 from .. import bsa
 
 RE_HEADER = re.compile(r"^%\s*MPF\s*(\S+)", re.I)
-RE_COMMENT = re.compile(r"\(([^)]*)\)")
-RE_SUBCALL = re.compile(r"^L(\d+)\s*$", re.I)
+# Commentaire : on capture jusqu'a la DERNIERE parenthese de la ligne. Le
+# commentaire d'en-tete contient lui-meme des parentheses imbriquees
+# (« MASTERCUT 1.7/2.1/1.65 (machine), Ø6 (diametre en mm) ») : s'arreter a la
+# premiere fermante perdait le diametre, la longueur et le DS.
+RE_COMMENT = re.compile(r"\((.*)\)\s*$")
+# Appel d'outillage : tolere un commentaire a la suite, comme « L56 (tete du bas) ».
+RE_SUBCALL = re.compile(r"^L(\d+)\s*(?:\(.*)?$", re.I)
 RE_BLOCK = re.compile(r"^N(\d+)\s+L(\d+)\b(.*)$", re.I)
 RE_RPARAM = re.compile(r"\bR(\d+)\s*=\s*(-?\d+(?:\.\d+)?)")
 RE_AXIS = re.compile(r"\b([YBCXZ])\s*(-?\d+(?:\.\d+)?)")
@@ -123,10 +128,20 @@ def parse(text: str, ref: str = "") -> RawProgram:
             prog.name = m.group(1)
             continue
 
-        m = RE_COMMENT.search(line)
-        if m and line.lstrip().startswith("("):
-            prog.comment = m.group(1).strip()
-            _parse_comment(prog)
+        if line.lstrip().startswith("("):
+            m = RE_COMMENT.search(line)
+            body = m.group(1).strip() if m else line.lstrip()[1:].strip()
+            prog.comment = body if not prog.comment else prog.comment
+            _parse_comment(prog, body)
+            continue
+        # Certains exports perdent les parentheses. Une ligne qui ne contient
+        # ni bloc, ni appel, ni axe, mais un Ø ou un L=, reste un commentaire.
+        if (not RE_BLOCK.match(line) and not RE_SUBCALL.match(line)
+                and (RE_DIAM.search(line) or RE_LEN.search(line)
+                     or RE_DS.search(line))
+                and not line.upper().startswith(("L1 ", "G9", "G0", "N"))):
+            prog.comment = prog.comment or line
+            _parse_comment(prog, line)
             continue
 
         if "M30" in line:
@@ -194,6 +209,18 @@ def parse(text: str, ref: str = "") -> RawProgram:
                 f"bloc N{b.index} : cintrage a {b.angle:g}° — verifier la "
                 "sequence de degagement de tete")
 
+    if not prog.tooling:
+        prog.warnings.append(
+            "aucun appel d'outillage (L54, L56, L58...) : tete et diametre "
+            "inconnus, repli sur le CODE_MAT de la LFT")
+    if prog.diameter is None:
+        prog.warnings.append(
+            "diametre absent du programme : repli sur le CODE_MAT de la LFT")
+    if prog.ds is None and prog.complete:
+        prog.warnings.append(
+            "pas de DS dans le commentaire : aucun temoin pour verifier le "
+            "dernier segment")
+
     r6 = prog.init.get("R6")
     if r6 is not None:
         if prog.declared_length is None:
@@ -209,16 +236,22 @@ def _rparams(fragment: str) -> dict[str, float]:
     return {f"R{k}": float(v) for k, v in RE_RPARAM.findall(fragment)}
 
 
-def _parse_comment(prog: RawProgram) -> None:
-    c = prog.comment
+def _parse_comment(prog: RawProgram, text: str = "") -> None:
+    """Extrait ce qu'on peut d'une ligne de commentaire.
+
+    On ne remplace jamais une valeur deja trouvee : le premier commentaire
+    d'en-tete fait autorite, les suivants ne font que completer.
+    """
+    c = text or prog.comment
     if not c:
         return
-    prog.machine = c.split(",")[0].strip()
-    if (m := RE_DIAM.search(c)):
+    if not prog.machine:
+        prog.machine = c.split(",")[0].strip(" (")
+    if prog.diameter is None and (m := RE_DIAM.search(c)):
         prog.diameter = float(m.group(1))
-    if (m := RE_LEN.search(c)):
+    if prog.declared_length is None and (m := RE_LEN.search(c)):
         prog.declared_length = float(m.group(1))
-    if (m := RE_DS.search(c)):
+    if prog.ds is None and (m := RE_DS.search(c)):
         prog.ds = float(m.group(1))
-    if (m := RE_RECOUPE.search(c)):
+    if prog.recut is None and (m := RE_RECOUPE.search(c)):
         prog.recut = float(m.group(1))

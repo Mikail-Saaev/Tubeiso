@@ -76,6 +76,9 @@ def samples_from(raws: list[RawProgram], recuts: dict[str, float] | None = None)
         if not raw.complete or raw.declared_length is None or raw.diameter is None:
             continue
         straights = [raw.init.get("R12", 0.0)] + [b.segment() for b in raw.blocks[:-1]]
-        out.append((straights, raw.angles, raw.diameter, raw.declared_length,
+        # angles REELS : c'est eux que porte le classeur Archivage, donc eux
+        # qui ont servi a calculer le R6 qu'on ajuste ici. [DOC 5.4 + 8.3.4]
+        angles = [bsa.true_angle(a, raw.diameter) for a in raw.angles]
+        out.append((straights, angles, raw.diameter, raw.declared_length,
                     recuts.get(raw.name, raw.recut or 0.0), raw.ds))
     return out

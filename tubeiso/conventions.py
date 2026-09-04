@@ -1,16 +1,15 @@
-"""Conversion programme ISO -> geometrie, convention BSA confirmee.
+"""Conversion programme ISO -> geometrie, convention BSA.
 
-La question ouverte des versions precedentes est resolue. Sources : la
-documentation de formation Crippa et les formules de `archivage_crippa.xlsm`.
+Sources : la documentation de formation Crippa et les formules de
+`archivage_crippa.xlsm`.
 
-Trois regles, toutes verifiees numeriquement :
+Quatre regles, toutes verifiees numeriquement sur le corpus 0792-0002-JV :
 
 1. Un segment droit vaut la SOMME SIGNEE des deplacements Y de son bloc.
    Le programmeur ecrit `Y-35` puis `Y-(L-35)` des que L > 35, exactement la
-   formule `=IF(Y>35, Y-35, "")` de la feuille Excel. Verifie sur 412
-   (35+107=142), 409 (35+148=183), 407 (35+47=82) et 410 (35+28.5=63.5).
-   La somme est signee pour absorber l'astuce anti-collision du chapitre 5.8,
-   ou le programme avance de 30, tourne de 180 puis revient de 30.
+   formule `=IF(Y>35, Y-35, "")` de la feuille Excel. La somme est signee pour
+   absorber l'astuce anti-collision du chapitre 5.8, ou le programme avance de
+   30, tourne de 180 puis revient de 30.
 
 2. Le premier segment est R12. Le dernier n'est PAS ecrit : il se deduit de
    R6 via la formule d'allongement. DS n'est qu'un commentaire d'aide, et
@@ -18,6 +17,26 @@ Trois regles, toutes verifiees numeriquement :
 
 3. Les Y sont des longueurs tangente-a-tangente, arrondies a 0.5 mm.
    Confirme par la mesure Catia du tube 410 : 33.861 -> 34, 63.591 -> 63.5.
+
+4. R15 n'est PAS l'angle du tube. Il porte le supplement de retour elastique
+   [DOC 5.4], et TOUTE la chaine de longueur travaille sur l'angle reel.
+
+   C'est contre-intuitif, alors voici pourquoi. Le [DOC 8.3.4] dit de reporter
+   dans la colonne R15 du classeur Archivage l'angle MESURE dans Catia. Le
+   supplement d'elasticite n'est ajoute qu'au moment d'ecrire le programme.
+   La colonne R15 du classeur et le R15 du programme ne contiennent donc pas
+   la meme chose, et c'est le classeur — donc l'angle reel — qui a produit le
+   R6 grave dans le programme.
+
+   Le corpus le confirme. En deduisant le dernier segment avec les angles
+   reels, l'ecart au DS tombe a 0.41 mm en moyenne quadratique ; avec R15
+   brut il vaut 1.22 mm et depasse 2 mm sur le repere 411.
+
+Le choix du mode de correction est expose dans les reglages :
+
+    entier          on inverse l'arrondi du programmeur (defaut, angles ronds)
+    proportionnel   r15 * 90 / R15_a_90, sans arrondi
+    brut            aucune correction, comportement des versions <= v4
 """
 from __future__ import annotations
 
@@ -28,18 +47,24 @@ from .parsers.crippa import RawProgram
 
 class BSAConvention:
     name = "bsa"
-    description = "somme signee des Y, dernier segment deduit de R6 [DOC+XLSM]"
+    description = ("somme signee des Y, dernier segment deduit de R6, "
+                   "angle reel apres retour elastique [DOC+XLSM]")
 
-    def build(self, raw: RawProgram, tooling: Tooling,
-              recut: float = 0.0, use_true_angles: bool = False) -> TubeProgram:
+    def build(self, raw: RawProgram, tooling: Tooling, recut: float = 0.0,
+              angle_mode: str = bsa.DEFAULT_ANGLE_MODE,
+              use_true_angles: bool | None = None) -> TubeProgram:
+        # compatibilite avec l'ancien parametre booleen
+        if use_true_angles is not None:
+            angle_mode = bsa.DEFAULT_ANGLE_MODE if use_true_angles else "brut"
+        if angle_mode not in bsa.ANGLE_MODES:
+            angle_mode = bsa.DEFAULT_ANGLE_MODE
+
         warnings = list(raw.warnings)
         diameter = raw.diameter or tooling.diameter
         r15 = list(raw.angles)
-        angles = ([bsa.true_angle(a, diameter) for a in r15]
-                  if use_true_angles else list(r15))
 
         clr = tooling.clr
-        if clr is None and int(diameter) in bsa.RM:
+        if clr is None and int(diameter or 0) in bsa.RM:
             clr = bsa.bend_radius(diameter)
 
         head = raw.init.get("R12")
@@ -49,11 +74,18 @@ class BSAConvention:
         mid = [b.segment() for b in raw.blocks[:-1]] if raw.blocks else []
         straights = [head, *mid]
 
+        # --- angles reels : ils servent a la fois a la geometrie et au calcul
+        # de longueur, parce que c'est eux que porte la feuille Archivage.
+        real = [bsa.real_angle(a, diameter, angle_mode) for a in r15]
+        angles = [a for a, _ in real]
+
+        # --- dernier segment : deduit de R6 par la formule d'allongement
         last = None
         if raw.declared_length is not None and clr is not None and raw.complete:
             try:
-                last = bsa.last_straight(raw.declared_length, straights,
-                                         r15, diameter, recut)
+                last = bsa.last_straight(
+                    raw.declared_length, straights, angles, diameter, recut,
+                    rm=clr, elongation=tooling.elongation or None)
             except KeyError as exc:
                 warnings.append(str(exc))
         if last is None:
@@ -64,24 +96,41 @@ class BSAConvention:
             warnings.append(
                 f"dernier segment negatif ({last:.1f} mm) : programme incomplet "
                 "ou R6 faux")
-        elif raw.ds is not None and abs(last - raw.ds) > 1.0:
-            warnings.append(
-                f"dernier segment calcule {last:.1f} mm contre DS={raw.ds:g} "
-                f"(ecart {last - raw.ds:+.1f} mm)")
         straights.append(last)
 
-        sign = bsa.rotation_sign(raw.head) if raw.head else 1
         bends = []
-        for i, a in enumerate(angles):
+        for i, (true, delta) in enumerate(real):
             rot = raw.blocks[i - 1].rotation() if i > 0 else 0.0
-            bends.append(Bend(angle=a, rotation=sign * rot, clr=clr))
+            bends.append(Bend(angle=true, rotation=rot, clr=clr,
+                              r15=r15[i], springback=delta))
+
+        if angle_mode != "brut" and any(b.springback for b in bends):
+            total = sum(b.springback for b in bends)
+            warnings.append(
+                f"retour elastique retire : {total:g}° au total sur "
+                f"{sum(1 for b in bends if b.springback)} coude(s) [DOC 5.4]")
 
         return TubeProgram(
             ref=raw.name, program=raw.name, diameter=diameter,
             tooling=raw.tooling or tooling.name,
-            declared_length=raw.declared_length, comment=raw.comment,
+            declared_length=raw.declared_length, ds=raw.ds, comment=raw.comment,
             straights=straights, bends=bends, params=dict(raw.init),
-            source=raw.source, complete=raw.complete, warnings=warnings,
+            source=raw.source, complete=raw.complete, angle_mode=angle_mode,
+            warnings=warnings,
+        )
+
+    def build_straight(self, ref: str, length: float, diameter: float,
+                       tooling: Tooling) -> TubeProgram:
+        """Tube laisse droit : pas de programme, juste une longueur et un Ø.
+
+        « Meme s'il n'y a pas de programme, il faut generer la 3D avec
+        uniquement la longueur et le diametre. » — consigne BSA.
+        """
+        return TubeProgram(
+            ref=ref, program="", diameter=diameter or tooling.diameter,
+            tooling=tooling.name, declared_length=length,
+            comment="tube droit, sans programme de cintrage",
+            straights=[float(length)], bends=[], complete=True, straight=True,
         )
 
 

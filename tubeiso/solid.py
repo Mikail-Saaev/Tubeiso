@@ -95,7 +95,7 @@ def build_solid(tube: TubeProgram, cl: Centerline, wall: float | None = None):
 
 def export(tube: TubeProgram, cl: Centerline, out_dir: str | Path,
            tooling: Tooling | None = None, formats=("step",),
-           with_centerline: bool = True) -> list[Path]:
+           with_centerline: bool = True, basename: str | None = None) -> list[Path]:
     """Ecrit les fichiers CAO. Retourne la liste des chemins produits."""
     cq = _cq()
     out = Path(out_dir)
@@ -103,15 +103,16 @@ def export(tube: TubeProgram, cl: Centerline, out_dir: str | Path,
     wall = tooling.wall if tooling else None
     solid = build_solid(tube, cl, wall)
     written: list[Path] = []
+    name = basename or tube.ref
 
     for fmt in formats:
         fmt = fmt.lower()
-        target = out / f"{tube.ref}.{'stp' if fmt == 'step' else fmt}"
+        target = out / f"{name}.{'stp' if fmt == 'step' else fmt}"
         if fmt == "step" and with_centerline:
-            asm = cq.Assembly(name=f"TUBE_{tube.ref}")
-            asm.add(cq.Workplane(obj=solid), name=f"tube_{tube.ref}")
+            asm = cq.Assembly(name=f"TUBE_{name}")
+            asm.add(cq.Workplane(obj=solid), name=f"tube_{name}")
             asm.add(cq.Workplane(obj=centerline_wire(cl)),
-                    name=f"fibre_neutre_{tube.ref}")
+                    name=f"fibre_neutre_{name}")
             asm.save(str(target), exportType="STEP")
         else:
             cq.exporters.export(cq.Workplane(obj=solid), str(target),

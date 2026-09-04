@@ -11,7 +11,7 @@ une **ligne de commande** pour le traitement par lot, et une **bibliothèque
 Python**. Voir `DEMARRAGE.md` pour l'installation.
 
 ```
-LFT.xlsx  ──parseur──▶  LRA brut  ──convention BSA──▶  LRA géométrique
+LFT.xlsx ──lecteur──▶ lots + tubes ──parseur──▶ LRA brut ──convention BSA──▶ LRA géométrique
                                                               │
                                                      contrôles machine
                                                               │
@@ -144,46 +144,93 @@ avec `Rm` = 11 mm (Ø4 et Ø6), 14 (Ø8), 23 (Ø10), 30 (Ø12), 45 (Ø15/16),
 3. **Les `Y` sont des longueurs tangente-à-tangente, arrondies à 0,5 mm.**
    Vérifié contre CATIA sur le tube 410 : 33,861 → 34 et 63,591 → 63,5.
 
-### Point ouvert : la compensation d'élasticité
+### Le retour élastique — tranché
 
-Sur trois pièces sur quatre, `Σ(R15)` dépasse de 2 à 4,6 % l'angle qui ferait
-tomber le dernier segment exactement sur `DS` — un ordre de grandeur qui
-correspond à la colonne « Élasticité » de la doc. `R15` semble donc porter la
-compensation de retour élastique, alors que la formule Excel l'utilise brut.
+`R15` **n'est pas** l'angle du tube. C'est l'angle à commander pour obtenir
+l'angle voulu une fois l'élasticité relâchée. La documentation donne le R15
+d'un pli réel à 90° : 93° en Ø4, 92° en Ø6/8/10, 92,5° en Ø12/15, 93° en Ø18
+[DOC 5.4]. Le supplément est proportionnel à l'angle — « pour un angle de 45°,
+divisé par deux env. l'angle additionnel » — et le programmeur l'**arrondit**
+avant de l'ajouter, comme le montre l'annotation du 412 : « R15=46, en réalité
+45° mais faut ajouter 1° pour élasticité ».
 
-L'écart sur la géométrie est de 1 à 2 mm sur le dernier segment. L'option
-`use_true_angles=True` de `BSAConvention.build()` applique la correction.
-**Une mesure d'angle dans CATIA sur un seul tube tranche la question.**
+`bsa.real_angle()` inverse cette opération. Trois modes, réglables dans
+l'interface :
+
+| Mode | Traitement | Ø6, R15 = 46 |
+|---|---|---|
+| `entier` (défaut) | inverse l'arrondi du programmeur | 45° |
+| `proportionnel` | `R15 × 90 / R15₉₀` | 45,00° |
+| `brut` | aucune correction (comportement ≤ v4) | 46° |
+
+Le mode `entier` restitue des angles ronds sur tout le corpus : 90, 45, 91,
+88, 75, 43, 30. Il boucle exactement — `programmed_angle(real_angle(x)) == x`.
+
+Toute la chaîne de longueur travaille aussi sur l'angle réel. C'est
+contre-intuitif mais c'est ce que dit le [DOC 8.3.4] : la colonne `R15` du
+classeur *Archivage* reçoit l'angle **mesuré dans Catia**, et le supplément
+n'est ajouté qu'au moment d'écrire le programme. C'est donc l'angle réel qui a
+produit le `R6` gravé dans le programme. Le corpus le confirme : l'écart au
+`DS` tombe de **1,22 mm à 0,41 mm** en moyenne quadratique.
 
 ## Le garde-fou central
 
-Le développé recalculé est comparé au développé déclaré (`R6` / colonne
-`LONGUEUR`). C'est le seul juge de paix disponible :
+Jusqu'à la v4 on comparait le développé recalculé à `R6`. Ce contrôle **ne
+pouvait pas échouer** : le dernier segment était déduit de `R6` par la même
+équation, donc l'algèbre se simplifiait et l'écart valait exactement zéro sur
+toutes les pièces, y compris avec un rayon faux.
 
-| Résultat | Interprétation |
-|---|---|
-| écart < 0,5 mm sur toutes les pièces | convention et rayon justes |
-| écart systématique et non nul | convention fausse |
-| écart aléatoire | données d'entrée corrompues |
+Il est remplacé par les deux seuls témoins réellement indépendants du calcul :
 
-`plan` **refuse de tracer** une pièce dont le développé ne concorde pas, ou
-dont le programme est tronqué. `--force` passe outre pour inspection, mais le
-cartouche porte alors la mention ERREUR.
+| Témoin | Origine | Seuils |
+|---|---|---|
+| `DS` | commentaire du programme, écrit au mm | ±0,75 info · ±2 alerte · au-delà erreur |
+| `LONGUEUR` | colonne de la LFT, quand elle diffère de `R6` | ±0,5 mm |
+
+`plan` refuse de tracer une pièce dont le programme est tronqué. `--force`
+passe outre pour inspection, mais le cartouche porte alors la mention ERREUR.
+
+## La lecture du LFT
+
+Le gabarit LFT vient de Wire2000 : une liste de fils détournée pour des tubes,
+75 colonnes dont la plupart vides. Sa mise en page varie d'un export à l'autre,
+et rien ne garantit qu'un tube tienne sur une seule ligne. `lft.py` ne suppose
+donc **rien** :
+
+- l'en-tête est cherché dans **toutes** les feuilles et à n'importe quelle
+  ligne, par reconnaissance des noms de colonnes — pas par position ;
+- les noms sont normalisés (accents, casse, espaces, tirets) et une table de
+  synonymes couvre les variantes (`Prog Crippa`, `Repère`, `Long.`…) ;
+- les lignes d'un même tube sont regroupées quel que soit leur ordre, y compris
+  une ligne de continuation sans aucune identité ;
+- **aucune valeur n'est perdue** : chaque colonne conserve la liste ordonnée de
+  toutes les valeurs distinctes rencontrées, avec le numéro de ligne d'origine.
+  L'onglet *LFT* les affiche toutes, y compris celles que l'application
+  n'exploite pas ;
+- les tubes sont regroupés par **lot** (colonne `LISTE`), et chaque lot est
+  encadré et étiqueté dans la liste de gauche.
+
+Deux notions à ne jamais confondre, et que le code sépare explicitement :
+
+| | Colonne | Exemple | Sens |
+|---|---|---|---|
+| **Liste / lot** | `LISTE` | `0792-0002-JV` | numéro de LFT |
+| **Programme** | `PROGRAMME` | `792_JV-412` | numéro du programme |
+
+Un même repère peut exister dans deux lots : les pièces sont donc identifiées
+par un `uid` stable, jamais par leur repère, et le doublon est signalé.
 
 ## Ce qui reste à faire
 
-1. **Réexporter les programmes tronqués** à 255 caractères. Sur 7 pièces du
-   fichier d'essai, 4 sont coupées. Sur 10 000 programmes, c'est le premier
-   chantier. `inspect` en donne le décompte immédiatement.
-2. **Trancher la compensation d'élasticité** par une mesure d'angle CATIA sur
-   un tube. Deux minutes de travail, 1 à 2 mm de précision à la clé.
-3. **Vérifier le sens de rotation** sur une pièce réelle. `bsa.rotation_sign()`
-   applique la règle de la doc (horaire positif en tête du bas), mais une
-   erreur de signe donne une pièce en miroir, plausible et inmontable.
-4. **Modéliser les extrémités** : embouts `V04`/`V06`/`V08` (sertissage Vögel)
+1. **Réexporter les programmes tronqués** à 255 caractères. L'extraction
+   `07920002jv.xlsx` montre que la base, elle, n'est pas tronquée.
+2. **Vérifier le sens de rotation** sur une pièce réelle. Un seul réglage
+   global, `handedness` ; une erreur de signe donne une pièce en miroir,
+   plausible et immontable.
+3. **Modéliser les extrémités** : embouts `V04`/`V06`/`V08` (sertissage Vögel)
    et profondeurs de forage du chap. 8.1.2, qui conditionnent les longueurs
    du premier et du dernier segment.
-5. **Traitement par lot** sur les 10 000 programmes, avec un rapport
+4. **Traitement par lot** sur les 10 000 programmes, avec un rapport
    récapitulatif des pièces conformes, alertées et rejetées.
 
 ## Structure
@@ -192,7 +239,8 @@ cartouche porte alors la mention ERREUR.
 |---|---|
 | `model.py` | Modèle pivot : `Tooling`, `Bend`, `TubeProgram` |
 | `parsers/crippa.py` | Lecture syntaxique du dialecte Crippa, sans interprétation |
-| `bsa.py` | Constantes machine et modèle de longueur, avec sources |
+| `lft.py` | Lecture du LFT : en-tête, regroupement multi-lignes, lots |
+| `bsa.py` | Constantes machine, modèle de longueur et retour élastique |
 | `conventions.py` | Longueurs machine → longueurs géométriques |
 | `geometry.py` | LRA → fibre neutre 3D |
 | `validate.py` | Contrôles : développé, droites, angles, auto-collision |

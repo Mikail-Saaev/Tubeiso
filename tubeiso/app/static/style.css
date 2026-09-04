@@ -86,7 +86,18 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 
 /* ---------------------------------------------------------------- tube list */
-.list { flex: 1; overflow-y: auto; list-style: none; padding: 0 6px 6px; }
+.list { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+.list ul { list-style: none; padding: 4px; }
+
+/* Chaque lot est encadre et porte son numero : la separation entre deux lots
+   doit se voir d'un coup d'oeil. */
+.lot { margin: 0 0 10px; border: 1px solid var(--line); border-radius: 8px;
+       background: rgba(0, 0, 0, .16); }
+.lot-head { display: flex; align-items: center; gap: 8px;
+            padding: 7px 9px; border-bottom: 1px solid var(--line); }
+.lot-no { font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+          letter-spacing: .4px; color: var(--accent); }
+.lot-head .chip { margin-left: auto; }
 .list li {
   display: flex; align-items: center; gap: 9px;
   padding: 7px 8px; border-radius: 6px; cursor: pointer;
@@ -126,6 +137,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .lab.len { color: #bfe0ff; border-color: #2f5d86; }
 .lab.ang { color: #ffd9a3; border-color: #7a5a24; }
 .lab.mes { color: #a8f0cd; border-color: #2f7a58; }
+.lab[hidden] { display: none !important; }
 
 .hint, .spinner {
   position: absolute; inset: 0; display: grid; place-items: center;
@@ -271,3 +283,24 @@ select {
 .set-actions { display: flex; gap: 7px; margin: 14px 0 4px; }
 .set-actions button { flex: 1; }
 .set-note { font-size: 11px; color: var(--fg-faint); line-height: 1.5; margin-top: 8px; }
+
+
+/* ------------------------------------------------- onglet Cotations, ajouts */
+.kv dt[title] { cursor: help; border-bottom: 1px dotted var(--fg-faint); }
+.prog { font-family: var(--mono); font-size: 10.5px; color: var(--warn);
+        background: rgba(242, 169, 59, .1); border: 1px solid #7a5a24;
+        border-radius: 3px; padding: 0 4px; margin-left: 5px; }
+.note { color: var(--fg-faint); font-size: 11.5px; line-height: 1.5;
+        padding: 8px 0 0; }
+.note em { color: var(--fg-dim); font-style: normal; font-weight: 600; }
+.src { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); }
+
+/* ------------------------------------------------------------- onglet LFT */
+table.lft { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+table.lft td { padding: 4px 6px; border-bottom: 1px solid var(--line);
+               vertical-align: top; word-break: break-word; }
+table.lft td.col { font-family: var(--mono); color: var(--fg-dim);
+                   white-space: nowrap; width: 42%; }
+table.lft tr.conflict td { background: rgba(242, 169, 59, .09); }
+.warnmark { display: block; color: var(--warn); font-size: 10.5px;
+            font-style: normal; margin-top: 2px; }

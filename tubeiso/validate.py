@@ -2,6 +2,15 @@
 
 Chaque controle porte la reference de sa source dans la documentation de
 formation ou dans le fichier Archivage Crippa.
+
+Un mot sur le controle de longueur. Jusqu'a la v4, on comparait le developpe
+recalcule a R6 — mais le dernier segment etait justement DEDUIT de R6 par la
+meme equation. Le calcul se simplifiait, l'ecart valait exactement zero sur
+toutes les pieces, et le controle ne pouvait donc rien detecter. Il est
+remplace ici par les deux seuls temoins reellement independants du calcul :
+
+    DS         le dernier segment ecrit dans le commentaire du programme
+    LONGUEUR   la longueur portee par la LFT, quand elle differe de R6
 """
 from __future__ import annotations
 
@@ -12,6 +21,13 @@ from .geometry import Centerline
 from .model import Tooling, TubeProgram
 
 ERROR, WARN, INFO = "erreur", "alerte", "info"
+
+# DS est ecrit au millimetre et les Y sont arrondis a 0.5 mm : en dessous de
+# ce seuil, un ecart ne prouve rien.
+DS_ROUNDING = 0.75
+# Au-dela, l'ecart ne s'explique plus par l'arrondi : c'est soit un DS perime
+# (cas connu du repere 412), soit un modele de longueur faux.
+DS_SUSPECT = 2.0
 
 
 @dataclass
@@ -28,13 +44,30 @@ class Issue:
 
 def check(tube: TubeProgram, tooling: Tooling,
           centerline: Centerline | None = None,
-          recut: float = 0.0, length_tol: float = 1.0) -> list[Issue]:
+          recut: float = 0.0, length_tol: float = 1.0,
+          lft_length: float | None = None) -> list[Issue]:
     out: list[Issue] = []
     d = int(tube.diameter) if tube.diameter else 0
 
     for w in tube.warnings:
-        lvl = ERROR if ("negatif" in w or "incomplet" in w) else WARN
+        if "retour elastique" in w or "reconstitue depuis" in w:
+            lvl = INFO
+        elif "negatif" in w or "incomplet" in w:
+            lvl = ERROR
+        else:
+            lvl = WARN
         out.append(Issue(lvl, "parseur", w))
+
+    # --- tube droit : quelques controles seulement
+    if tube.straight:
+        L = sum(tube.straights)
+        if L <= 0:
+            out.append(Issue(ERROR, "longueur_absente",
+                             "tube droit sans longueur exploitable"))
+        else:
+            out.append(Issue(INFO, "tube_droit",
+                             f"tube droit de {L:.0f} mm, aucun cintrage"))
+        return out
 
     if not tube.complete:
         out.append(Issue(ERROR, "programme_tronque",
@@ -45,23 +78,17 @@ def check(tube: TubeProgram, tooling: Tooling,
                          f"Ø{tube.diameter:g} absent des tables BSA", "DOC p.4"))
         return out
 
-    # --- bouclage : le seul juge de paix
-    r15 = [b.angle for b in tube.bends]
-    calc = bsa.developed_length(tube.straights, r15, d, recut)
-    if tube.declared_length:
-        delta = calc - tube.declared_length
-        out.append(Issue(INFO if abs(delta) <= length_tol else ERROR, "bouclage_R6",
-                         f"R6 recalcule {calc:.1f} / declare "
-                         f"{tube.declared_length:.0f} ({delta:+.2f} mm)",
-                         "XLSM Feuil2"))
+    # --- controle de longueur, sur temoins independants
+    _check_length(out, tube, recut, lft_length)
 
-    L = tube.declared_length or calc
+    L = tube.declared_length or sum(tube.straights)
     if L < bsa.MIN_DEVELOPED:
         out.append(Issue(ERROR, "developpe_court",
                          f"{L:.0f} mm < {bsa.MIN_DEVELOPED:.0f} mm", "DOC 2.2"))
     elif L < bsa.RECOMMENDED_DEVELOPED:
         out.append(Issue(WARN, "developpe_court",
-                         f"{L:.0f} mm < {bsa.RECOMMENDED_DEVELOPED:.0f} recommandes",
+                         f"{L:.0f} mm < {bsa.RECOMMENDED_DEVELOPED:.0f} recommandes "
+                         f"(rajouter {bsa.RECOMMENDED_DEVELOPED - L:.0f} mm)",
                          "DOC 2.2"))
     if L > bsa.MAX_DEVELOPED:
         out.append(Issue(ERROR, "developpe_long",
@@ -97,14 +124,20 @@ def check(tube: TubeProgram, tooling: Tooling,
                              f"{last:.1f} mm > {bsa.MAX_LAST:.0f} mm : "
                              "prevoir un faux pli a 0°", "DOC 5.3"))
 
-    # --- angles
+    # --- angles : on controle le PROGRAMME (R15), pas l'angle reel, car c'est
+    # R15 que la machine execute et que borne la course de l'axe C.
     for i, b in enumerate(tube.bends, start=1):
-        if b.angle <= 0:
-            out.append(Issue(WARN, "angle_nul", f"coude {i} : {b.angle:g}°"))
-        elif b.angle >= 180:
+        r15 = b.r15 if b.r15 is not None else b.angle
+        if r15 <= 0:
+            out.append(Issue(WARN, "angle_nul", f"coude {i} : {r15:g}°"))
+        elif r15 > bsa.MAX_BEND_ANGLE:
+            out.append(Issue(ERROR, "angle_hors_course",
+                             f"coude {i} : R15={r15:g}° > {bsa.MAX_BEND_ANGLE:g}° "
+                             "de course de l'axe C", "DOC 3.2"))
+        elif r15 >= 180:
             out.append(Issue(WARN, "cintrage_180",
-                             f"coude {i} : {b.angle:g}° — sequence de degagement",
-                             "DOC 5.7"))
+                             f"coude {i} : R15={r15:g}° — sequence de degagement "
+                             "de tete obligatoire", "DOC 5.7"))
 
     # --- R7=0 avant l'avant-dernier pli
     if tube.params.get("R7") == 2 and len(tube.bends) >= 2:
@@ -124,6 +157,37 @@ def check(tube: TubeProgram, tooling: Tooling,
         elif dist < 2 * tube.diameter:
             out.append(Issue(WARN, "passage_serre", f"rapprochement {dist:.1f} mm"))
     return out
+
+
+def _check_length(out: list[Issue], tube: TubeProgram, recut: float,
+                  lft_length: float | None) -> None:
+    """Les deux temoins independants du modele de longueur."""
+    ds = tube.ds
+    last = tube.straights[-1] if tube.straights else None
+
+    if ds is not None and last is not None:
+        delta = last - ds
+        if abs(delta) <= DS_ROUNDING:
+            lvl, note = INFO, "dans l'arrondi du DS"
+        elif abs(delta) <= DS_SUSPECT:
+            lvl, note = WARN, "au-dela de l'arrondi"
+        else:
+            lvl, note = ERROR, "incoherent"
+        out.append(Issue(lvl, "controle_DS",
+                         f"dernier segment calcule {last:.2f} mm contre DS={ds:g} "
+                         f"({delta:+.2f} mm, {note})", "commentaire programme"))
+    elif tube.complete:
+        out.append(Issue(WARN, "pas_de_temoin",
+                         "aucun DS dans le commentaire : le modele de longueur "
+                         "n'est verifie par rien sur cette piece"))
+
+    if lft_length is not None and tube.declared_length is not None:
+        delta = lft_length - tube.declared_length
+        if abs(delta) > 0.51:
+            out.append(Issue(ERROR, "longueur_LFT",
+                             f"LONGUEUR={lft_length:g} contredit R6="
+                             f"{tube.declared_length:g} ({delta:+.1f} mm)",
+                             "colonne LFT"))
 
 
 def worst(issues: list[Issue]) -> str:

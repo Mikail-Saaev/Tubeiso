@@ -84,12 +84,17 @@ class MissingRadius(ValueError):
 def build(tube: TubeProgram, samples: int = 24, handedness: int = 1) -> Centerline:
     """Construit la fibre neutre. handedness = -1 inverse le sens des rotations."""
     if not tube.bends:
+        # Tube droit. La longueur est la SOMME des droites : un tube sans coude
+        # peut en porter plusieurs (premier segment + dernier deduit de R6).
+        L = float(sum(tube.straights)) if tube.straights else 0.0
+        if L <= 1e-9:
+            raise ValueError(
+                f"piece {tube.ref} : tube droit de longueur nulle. Renseigne "
+                "LONGUEUR dans la LFT ou R6 dans le programme.")
         n = max(2, samples)
-        L = tube.straights[0] if tube.straights else 0.0
-        pts = np.linspace([0, 0, 0], [L, 0, 0], n)
-        prim = [Primitive("line", pts[0], pts[-1])] if L > 1e-9 else []
+        pts = np.linspace([0.0, 0.0, 0.0], [L, 0.0, 0.0], n)
         return Centerline(pts, pts[[0, -1]], np.empty((0, 3)), L, pts[[0, -1]],
-                          prim)
+                          [Primitive("line", pts[0].copy(), pts[-1].copy())])
 
     missing = [i for i, b in enumerate(tube.bends) if b.clr is None]
     if missing:

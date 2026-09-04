@@ -33,8 +33,9 @@
     <div class="panel-head">
       <h2>Pièces</h2><span id="count" class="chip">0</span>
     </div>
-    <input id="filter" type="search" placeholder="Filtrer…" spellcheck="false">
-    <ul id="list" class="list"></ul>
+    <input id="filter" type="search" placeholder="Filtrer : repère, programme, lot…"
+           spellcheck="false">
+    <div id="list" class="list"></div>
     <div class="legend">
       <span><i class="dot info"></i>conforme</span>
       <span><i class="dot warn"></i>alerte</span>
@@ -80,10 +81,11 @@
       </div>
       <div class="group">
         <button data-view="iso">Iso</button>
-        <button data-view="x">X</button>
-        <button data-view="y">Y</button>
-        <button data-view="z">Z</button>
+        <button data-view="x" title="Vue suivant X">X</button>
+        <button data-view="y" title="Vue suivant Y">Y</button>
+        <button data-view="z" title="Vue de dessus">Z</button>
         <button id="fit">Recadrer</button>
+        <button data-toggle="grid" class="on" title="Plateau de référence">Plateau</button>
       </div>
       <div class="grow"></div>
       <div id="readout" class="readout"></div>
@@ -95,11 +97,13 @@
       <button data-tab="dims" class="on">Cotations</button>
       <button data-tab="diag">Diagnostic</button>
       <button data-tab="prog">Programme</button>
+      <button data-tab="lft">LFT</button>
       <button data-tab="set">Réglages</button>
     </nav>
     <div id="tab-dims" class="tab on"></div>
     <div id="tab-diag" class="tab"></div>
     <div id="tab-prog" class="tab"></div>
+    <div id="tab-lft" class="tab"></div>
     <div id="tab-set" class="tab"></div>
   </aside>
 </main>

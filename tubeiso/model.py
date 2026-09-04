@@ -29,11 +29,24 @@ class Tooling:
 
 @dataclass
 class Bend:
-    """Un coude. rotation = rotation du plan AVANT ce coude (axe B)."""
+    """Un coude.
 
-    angle: float                 # degres (axe C, R15 chez Crippa)
-    rotation: float = 0.0        # degres (axe B)
+    `angle`      angle REEL du tube apres retour elastique. C'est lui qui fait
+                 la geometrie, donc le modele 3D et le plan.
+    `r15`        angle PROGRAMME, tel qu'il est ecrit dans le bloc L2/L3.
+    `springback` supplement d'elasticite retire : r15 - angle. [DOC 5.4]
+    `rotation`   rotation du plan de cintrage AVANT ce coude (axe B).
+    """
+
+    angle: float
+    rotation: float = 0.0
     clr: float | None = None     # peut surcharger l'outillage (matrices multi-rayon)
+    r15: float | None = None
+    springback: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.r15 is None:
+            self.r15 = self.angle
 
 
 @dataclass
@@ -47,16 +60,21 @@ class TubeProgram:
     """
 
     ref: str
-    program: str = ""
+    program: str = ""              # nom du bloc %MPF
+    program_number: str = ""       # colonne PROGRAMME : 792_JV-412
+    list_number: str = ""          # colonne LISTE : 0792-0002-JV, le lot
     diameter: float = 0.0
     tooling: str = ""
-    declared_length: float | None = None   # R6 / colonne LONGUEUR : sert de controle
+    declared_length: float | None = None   # R6 : longueur de coupe du brut
+    ds: float | None = None                # DS du commentaire : temoin independant
     comment: str = ""
     straights: list[float] = field(default_factory=list)
     bends: list[Bend] = field(default_factory=list)
     params: dict[str, float] = field(default_factory=dict)
     source: str = ""
     complete: bool = True
+    straight: bool = False         # tube laisse droit, sans programme
+    angle_mode: str = "entier"     # mode de correction d'elasticite applique
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -69,6 +87,11 @@ class TubeProgram:
     @property
     def n_bends(self) -> int:
         return len(self.bends)
+
+    @property
+    def label(self) -> str:
+        """Ce qu'on affiche : le repere, qualifie par son lot s'il en a un."""
+        return f"{self.ref} · {self.list_number}" if self.list_number else self.ref
 
     def lra_rows(self) -> list[tuple[float, float, float]]:
         """Table LRA : une ligne par coude (longueur amont, rotation, angle)."""

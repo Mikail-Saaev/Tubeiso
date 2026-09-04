@@ -142,6 +142,109 @@ def test_solid_is_watertight():
     assert abs(rep["volume_mm3"] - attendu) / attendu < 0.01
 
 
+# ---------------------------------------------------------------- v5 : lecture
+
+def test_lft_multi_lignes_et_lots():
+    """Un tube eclate sur plusieurs lignes est reconstitue, les lots separes."""
+    from openpyxl import Workbook as XlWb
+    from tubeiso import lft
+    import tempfile, os
+
+    wb = XlWb()
+    ws = wb.active
+    ws.append([]); ws.append(["export du jour"]); ws.append([])
+    ws.append(["Repère", "CODE_MAT", "Long.", "LISTE", "PROGRAMME", "Prog Crippa",
+               "EMBOUT_2", "RECOUPE_2"])
+    ws.append([412, "293-421-006", 263, "LOT-A", "A-412", PROG, None, None])
+    ws.append([412, None, None, "LOT-A", "A-412", None, "V06", None])   # 2e ligne
+    ws.append([None, None, None, None, None, None, None, 7])            # continuation
+    ws.append([412, "293-421-006", 263, "LOT-B", "B-412", PROG, "V06", None])
+    path = os.path.join(tempfile.mkdtemp(), "t.xlsx")
+    wb.save(path)
+
+    book = lft.read(path)
+    assert len(book.lots) == 2, "les deux lots doivent etre separes"
+    a = book.lots[0].tubes[0]
+    assert len(a.rows) == 3, "les 3 lignes du tube doivent etre regroupees"
+    assert a.get("EMBOUT_2") == "V06", "aucune donnee ne doit etre perdue"
+    assert a.recut == 7, "la recoupe de la ligne de continuation est conservee"
+    assert a.list_number == "LOT-A" and a.program_number == "A-412"
+    assert book.lots[1].tubes[0].list_number == "LOT-B"
+    assert any("412" in w for w in book.warnings), "repere duplique a signaler"
+
+
+def test_lft_entete_introuvable():
+    from openpyxl import Workbook as XlWb
+    from tubeiso import lft
+    import tempfile, os
+    wb = XlWb(); wb.active.append(["a", "b", "c"])
+    path = os.path.join(tempfile.mkdtemp(), "x.xlsx")
+    wb.save(path)
+    try:
+        lft.read(path)
+    except ValueError:
+        return
+    raise AssertionError("un classeur sans colonnes LFT doit etre refuse")
+
+
+# ------------------------------------------------------- v5 : retour elastique
+
+def test_retour_elastique_aller_retour():
+    """R15 -> angle reel -> R15 doit boucler, et donner des angles ronds."""
+    from tubeiso import bsa
+    cas = [(6, 46, 45), (6, 13, 13), (6, 39, 38), (6, 90, 88), (6, 77, 75),
+           (4, 94, 91), (4, 34, 33), (4, 54, 52), (4, 26, 25),
+           (8, 92, 90), (8, 44, 43), (8, 31, 30), (8, 10, 10)]
+    for d, r15, attendu in cas:
+        reel, delta = bsa.real_angle(r15, d)
+        assert reel == attendu, f"Ø{d} R15={r15} -> {reel}, attendu {attendu}"
+        assert bsa.programmed_angle(reel, d) == r15, f"Ø{d} : aller-retour casse"
+        assert delta == r15 - attendu
+
+
+def test_mode_brut_ne_corrige_rien():
+    from tubeiso import bsa
+    assert bsa.real_angle(94, 4, "brut") == (94.0, 0.0)
+
+
+def test_geometrie_sur_angle_reel():
+    """La 3D doit porter l'angle reel, le modele garde le R15 programme."""
+    from tubeiso import bsa, conventions
+    from tubeiso.model import Tooling
+    raw = crippa.parse(PROG)
+    tube = conventions.get("bsa").build(raw, Tooling("L56", 6.0, clr=11.0))
+    assert [b.r15 for b in tube.bends] == [46.0, 13.0]
+    assert [b.angle for b in tube.bends] == [45.0, 13.0]
+    assert tube.bends[0].springback == 1.0
+
+
+def test_tube_droit_a_une_longueur():
+    """Un tube sans programme doit produire un cylindre, pas un point."""
+    from tubeiso import conventions
+    from tubeiso.model import Tooling
+    tube = conventions.get("bsa").build_straight("500", 420.0, 6.0,
+                                                 Tooling("Ø6", 6.0, clr=11.0))
+    cl = geometry.build(tube)
+    assert abs(cl.developed - 420.0) < 1e-9
+    assert abs(float(np_norm(cl.points[-1] - cl.points[0])) - 420.0) < 1e-9
+
+
+def test_controle_DS_detecte_un_faux_rayon():
+    """Le controle de longueur doit reagir a un rayon errone. En v4 il valait
+    exactement zero quoi qu'il arrive."""
+    from tubeiso import conventions, validate
+    from tubeiso.model import Tooling
+    raw = crippa.parse(PROG)
+    bon = conventions.get("bsa").build(raw, Tooling("L56", 6.0, clr=11.0))
+    faux = conventions.get("bsa").build(raw, Tooling("L56", 6.0, clr=30.0))
+    ecart = lambda t: abs(t.straights[-1] - t.ds)
+    assert ecart(faux) > ecart(bon) + 5, "un rayon faux doit se voir"
+
+
+def np_norm(v):
+    return float((v ** 2).sum() ** 0.5)
+
+
 def _run() -> int:
     echecs = 0
     for name, fn in sorted(globals().items()):
@@ -169,3 +272,5 @@ if __name__ == "__main__":
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)
+
+

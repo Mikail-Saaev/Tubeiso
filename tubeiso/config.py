@@ -1,29 +1,48 @@
-"""Configuration et lecture des sources.
+"""Configuration et resolution de l'outillage.
 
 tooling.json est le seul endroit ou vivent les donnees que le programme
 machine ne contient pas : rayon de fibre neutre, epaisseur, matiere,
-contraintes machine. C'est le fichier a remplir quand tu auras la fiche
-outillage.
+contraintes machine. Toutes les valeurs par defaut viennent des tables de
+`bsa.py`, elles-memes sourcees dans la documentation de formation.
+
+La lecture du fichier LFT a demenage dans `lft.py`, qui ne fait plus aucune
+hypothese sur la mise en page du classeur.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from . import bsa
+from . import bsa, lft
 from .model import Tooling
 
+# [DOC p.4] Code matiere BSA -> diametre exterieur. La LFT ecrit des tirets,
+# la documentation des espaces : on normalise a la lecture.
+CODE_MAT_DIAMETER = {
+    "416421004": 4, "293421006": 6, "293421008": 8, "293421010": 10,
+    "293422012": 12, "293421015": 15, "293421016": 16, "293421018": 18,
+    "293421022": 22, "2934212022": 22,
+}
+
+
+def code_mat_diameter(code: object) -> int | None:
+    """'293-421-006' ou '293 421 006' -> 6."""
+    digits = "".join(c for c in str(code or "") if c.isdigit())
+    return CODE_MAT_DIAMETER.get(digits)
+
+
 def _default_tooling() -> dict:
-    """Table outillage par defaut, issue des tables BSA (bsa.py)."""
+    """Table outillage par defaut, integralement issue des tables BSA."""
     return {
-        f"\u00d8{d}": {
+        f"Ø{d}": {
             "diameter": float(d),
             "clr": float(bsa.RM[d]),
-            "wall": None,
-            "material": None,
+            "wall": bsa.WALL.get(d),
+            "material": (f"Tube Ermeto zingue {d}/{bsa.BORE[d]:g}"
+                         if d in bsa.BORE else None),
             "elongation": float(bsa.ELONGATION_PCT.get(d, 0.0)),
             "min_straight": bsa.MIN_STRAIGHT.get(d),
-            "max_angle": 184.0,
+            "max_angle": bsa.MAX_BEND_ANGLE,
         }
         for d in sorted(bsa.RM)
     }
@@ -31,13 +50,16 @@ def _default_tooling() -> dict:
 
 DEFAULT_CONFIG = {
     "convention": "bsa",
+    "angle_mode": bsa.DEFAULT_ANGLE_MODE,
     "handedness": 1,
     "length_tolerance": 1.0,
     "tooling": _default_tooling(),
     "code_mat_to_tooling": {
-        "293-421-006": "\u00d86",
-        "293-421-008": "\u00d88",
-        "416-421-004": "\u00d84",
+        code: f"Ø{d}" for code, d in (
+            ("416-421-004", 4), ("293-421-006", 6), ("293-421-008", 8),
+            ("293-421-010", 10), ("293-422-012", 12), ("293-421-015", 15),
+            ("293-421-016", 16), ("293-421-018", 18),
+        )
     },
 }
 
@@ -49,14 +71,19 @@ class Config:
                   "min_straight", "max_angle"}
         self.tooling: dict[str, Tooling] = {
             name: Tooling(name=name, **{k: v for k, v in spec.items() if k in fields})
-            for name, spec in data["tooling"].items()
+            for name, spec in data.get("tooling", {}).items()
         }
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":
         if path is None:
             return cls(json.loads(json.dumps(DEFAULT_CONFIG)))
-        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        # une configuration ecrite pour une version anterieure reste valable :
+        # on complete ce qui manque au lieu de refuser le fichier
+        for key, value in DEFAULT_CONFIG.items():
+            data.setdefault(key, json.loads(json.dumps(value)))
+        return cls(data)
 
     @classmethod
     def write_template(cls, path: str | Path) -> Path:
@@ -67,23 +94,31 @@ class Config:
 
     @property
     def convention(self) -> str:
-        return self.data.get("convention", "feed_only")
+        return self.data.get("convention") or "bsa"
+
+    @property
+    def angle_mode(self) -> str:
+        mode = self.data.get("angle_mode") or bsa.DEFAULT_ANGLE_MODE
+        return mode if mode in bsa.ANGLE_MODES else bsa.DEFAULT_ANGLE_MODE
 
     @property
     def handedness(self) -> int:
-        return int(self.data.get("handedness", 1))
+        return 1 if int(self.data.get("handedness", 1)) >= 0 else -1
 
     @property
     def tolerance(self) -> float:
-        return float(self.data.get("length_tolerance", 0.5))
+        return float(self.data.get("length_tolerance", 1.0))
 
     def for_program(self, tooling_name: str, diameter: float | None,
                     code_mat: str | None = None) -> Tooling:
-        """Resout l'outillage : nom du sous-programme, sinon CODE_MAT, sinon Ø."""
+        """Resout l'outillage : nom du sous-programme, sinon Ø, sinon CODE_MAT."""
         if tooling_name in self.tooling:
             return self.tooling[tooling_name]
-        mapped = self.data.get("code_mat_to_tooling", {}).get(code_mat or "")
-        if mapped in self.tooling:
+        if diameter is None:
+            diameter = code_mat_diameter(code_mat)
+        mapped = self.data.get("code_mat_to_tooling", {}).get(
+            str(code_mat or "").strip())
+        if diameter is None and mapped in self.tooling:
             return self.tooling[mapped]
         if diameter is not None:
             for t in self.tooling.values():
@@ -93,46 +128,40 @@ class Config:
             if d in bsa.RM:                 # repli sur les tables BSA officielles
                 return Tooling(
                     name=tooling_name or f"Ø{d}", diameter=float(d),
-                    clr=bsa.bend_radius(d),
+                    clr=bsa.bend_radius(d), wall=bsa.WALL.get(d),
                     elongation=bsa.ELONGATION_PCT.get(d, 0.0),
                     min_straight=bsa.MIN_STRAIGHT.get(d),
+                    max_angle=bsa.MAX_BEND_ANGLE,
                 )
+        if mapped in self.tooling:
+            return self.tooling[mapped]
         return Tooling(name=tooling_name or "?", diameter=diameter or 0.0)
 
 
 # --------------------------------------------------------------------------- LFT
 
 def read_lft(path: str | Path, program_column: str = "PROGCRIPPA") -> list[dict]:
-    """Lit un fichier LFT et retourne une ligne par piece.
+    """Compatibilite : une ligne plate par tube, comme dans les versions <= v4.
 
-    Le gabarit LFT est une liste de fils detournee pour des tubes : la plupart
-    des colonnes sont vides. On ne garde que celles qui portent une information.
+    Le code nouveau doit utiliser `lft.read()`, qui conserve toutes les
+    colonnes, regroupe les lignes d'un meme tube et rend les lots.
     """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb[wb.sheetnames[0]]
-    rows = ws.iter_rows(values_only=True)
-    header = [str(h) if h is not None else "" for h in next(rows)]
-    idx = {h: i for i, h in enumerate(header)}
-    if program_column not in idx:
-        raise KeyError(f"colonne {program_column} absente. Presentes : {header[:12]}...")
-
+    book = lft.read(path)
     out = []
-    for r in rows:
-        if r[idx[program_column]] is None:
-            continue
-        out.append({
-            "ref": str(r[idx.get("REP", 0)] or ""),
-            "code_mat": r[idx["CODE_MAT"]] if "CODE_MAT" in idx else None,
-            "length": r[idx["LONGUEUR"]] if "LONGUEUR" in idx else None,
-            "liste": r[idx["LISTE"]] if "LISTE" in idx else None,
-            "program_name": r[idx["PROGRAMME"]] if "PROGRAMME" in idx else None,
-            "recut": (r[idx["RECOUPE_1"]] if "RECOUPE_1" in idx else None)
-                     or (r[idx["RECOUPE_2"]] if "RECOUPE_2" in idx else None),
-            "end_1": r[idx["EMBOUT_1"]] if "EMBOUT_1" in idx else None,
-            "end_2": r[idx["EMBOUT_2"]] if "EMBOUT_2" in idx else None,
-            "iso": r[idx[program_column]],
-        })
-    wb.close()
+    for lot in book.lots:
+        for t in lot.tubes:
+            out.append({
+                "ref": t.rep or t.program_number or t.key,
+                "lot": lot.number,
+                "code_mat": t.get("CODE_MAT"),
+                "length": t.number("LONGUEUR"),
+                "liste": t.list_number,
+                "program_name": t.program_number,
+                "recut": t.recut,
+                "end_1": t.get("EMBOUT_1"),
+                "end_2": t.get("EMBOUT_2"),
+                "straight": t.straight,
+                "iso": t.iso,
+                "record": t,
+            })
     return out

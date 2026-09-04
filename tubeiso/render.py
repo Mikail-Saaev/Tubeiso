@@ -153,6 +153,8 @@ def to_svg(tube: TubeProgram, cl: Centerline, tooling: Tooling,
             break
         x, y = verts[i + 1]
         label = f"{bend.angle:g}°"
+        if bend.springback:
+            label += f" (R15 {bend.r15:g})"
         if bend.rotation:
             label += f"  R{bend.rotation:g}°"
         body.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="1.4" fill="none" '
@@ -177,8 +179,9 @@ def _table(tube: TubeProgram) -> str:
     x0, y0, x1, y1 = TABLE
     out = [_rect(x0, y0, x1, y1), _t(x0 + 2, y0 + 5, "Donnees de cintrage (LRA)", 3.0,
                                      weight="bold")]
-    cols = [x0 + 2, x0 + 18, x0 + 45, x0 + 72, x0 + 96]
-    heads = ["Coude", "Longueur L", "Rotation R", "Angle A", "Rayon"]
+    cols = [x0 + 2, x0 + 16, x0 + 40, x0 + 62, x0 + 84, x0 + 104]
+    heads = ["Coude", "Longueur L", "Rotation R", "Angle reel", "R15 prog.",
+             "Rayon"]
     yh = y0 + 11
     for cx, h in zip(cols, heads):
         out.append(_t(cx, yh, h, 2.4, weight="bold"))
@@ -187,6 +190,7 @@ def _table(tube: TubeProgram) -> str:
     for i, bend in enumerate(tube.bends):
         L = tube.straights[i] if i < len(tube.straights) else float("nan")
         vals = [f"{i + 1}", f"{L:.1f}", f"{bend.rotation:g}°", f"{bend.angle:g}°",
+                f"{bend.r15:g}°" if bend.r15 is not None else "-",
                 f"{bend.clr:.1f}" if bend.clr else "?"]
         for cx, v in zip(cols, vals):
             out.append(_t(cx, y, v, 2.4))
@@ -212,7 +216,6 @@ def _titleblock(tube: TubeProgram, cl: Centerline, tooling: Tooling,
 
     rows = [
         ("Repere", tube.ref),
-        ("Programme", tube.program),
         ("Diametre", f"Ø{tube.diameter:g}" + (f" x {tooling.wall:g}" if tooling.wall else "")),
         ("Matiere", tooling.material or "-"),
         ("Outillage", f"{tooling.name}  R={tooling.clr:g}" if tooling.clr else tooling.name),
@@ -221,6 +224,8 @@ def _titleblock(tube: TubeProgram, cl: Centerline, tooling: Tooling,
          if tube.declared_length else "-"),
         ("Echelle", f"1:{1 / lay.scale:.1f}" if lay.scale < 1 else f"{lay.scale:.1f}:1"),
         ("Coudes", str(tube.n_bends)),
+        ("Programme", tube.program_number or "-"),
+        ("Liste / lot", tube.list_number or "-"),
     ]
     out = [_rect(x0, y0, x1, y1), _t(x0 + 2, y0 + 5, "Plan isometrique de tube cintre",
                                      3.0, weight="bold")]

@@ -11,22 +11,50 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import bsa, calibrate, conventions, geometry, render, solid, validate
-from .config import Config, read_lft
+from . import bsa, calibrate, conventions, geometry, lft, render, solid, validate
+from .config import Config, code_mat_diameter
 from .parsers import crippa
 from .validate import ERROR
 
 
-def _load(path: str, column: str):
-    rows = read_lft(path, column)
-    raws = []
-    for row in rows:
-        raw = crippa.parse(str(row["iso"]), ref=row["ref"])
-        raw.name = raw.name or row["ref"]
-        if raw.declared_length is None and row["length"]:
-            raw.declared_length = float(row["length"])
-        raws.append((row, raw))
-    return raws
+def _load(path: str, column: str = "PROGCRIPPA"):
+    """Retourne (record LFT, programme brut) pour chaque tube, tous lots confondus."""
+    book = lft.read(path)
+    out = []
+    for lot in book.lots:
+        for rec in lot.tubes:
+            raw = crippa.parse(rec.iso, ref=rec.rep)
+            raw.name = raw.name or rec.rep or rec.program_number
+            length = rec.number("LONGUEUR")
+            if raw.declared_length is None and length:
+                raw.declared_length = float(length)
+            if raw.diameter is None:
+                d = code_mat_diameter(rec.get("CODE_MAT"))
+                if d:
+                    raw.diameter = float(d)
+            out.append((rec, raw))
+    return book, out
+
+
+def _make(cfg, rec, raw):
+    """Construit la piece et ses controles, tube droit compris."""
+    conv = conventions.get(cfg.convention)
+    diameter = raw.diameter or code_mat_diameter(rec.get("CODE_MAT"))
+    tooling = cfg.for_program(raw.tooling, diameter, rec.get("CODE_MAT"))
+    recut = rec.recut or float(raw.recut or 0.0)
+    length = rec.number("LONGUEUR")
+    if rec.straight or not rec.iso.strip():
+        tube = conv.build_straight(rec.rep, length or 0.0,
+                                   diameter or tooling.diameter, tooling)
+    else:
+        tube = conv.build(raw, tooling, recut=recut, angle_mode=cfg.angle_mode)
+    tube.ref = rec.rep or rec.program_number
+    tube.list_number = rec.list_number
+    tube.program_number = rec.program_number
+    tube.warnings.extend(rec.warnings)
+    issues = validate.check(tube, tooling, recut=recut,
+                            length_tol=cfg.tolerance, lft_length=length)
+    return tube, tooling, recut, issues
 
 
 def cmd_init(args) -> int:
@@ -38,26 +66,40 @@ def cmd_init(args) -> int:
 
 def cmd_inspect(args) -> int:
     cfg = Config.load(args.config)
-    data = _load(args.source, args.column)
-    print(f"{len(data)} pieces\n")
-    print(f"{'REP':>5} {'OUT':>5} {'Ø':>4} {'DECL':>7} {'COUDES':>7} {'M30':>4}  ETAT")
-    print("-" * 78)
-    bad = 0
-    for row, raw in data:
-        t = cfg.for_program(raw.tooling, raw.diameter, row["code_mat"])
-        flag = "oui" if raw.complete else "NON"
-        note = "; ".join(raw.warnings) or "ok"
-        if not raw.complete or raw.warnings:
-            bad += 1
-        print(f"{raw.name:>5} {t.name:>5} {raw.diameter or 0:>4g} "
-              f"{raw.declared_length or 0:>7g} {len(raw.angles):>7} {flag:>4}  {note[:38]}")
-    print(f"\n{len(data) - bad} piece(s) exploitable(s), {bad} a corriger.")
+    book, data = _load(args.source, args.column)
+    print(f"Fichier  : {book.path}")
+    print(f"Feuilles : {', '.join(book.sheets_read)}")
+    print(f"Colonnes : {len(book.columns)}")
+    print(f"Lots     : {len(book.lots)}   Pieces : {len(data)}" + chr(10))
+
+    counts = {validate.INFO: 0, validate.WARN: 0, validate.ERROR: 0}
+    pairs = {id(rec): raw for rec, raw in data}
+    for lot in book.lots:
+        print(f"LOT {lot.label}   -   {len(lot.tubes)} piece(s)")
+        print(f"  {'REP':>6} {'PROGRAMME':>18} {'OUT':>5} {'D':>4} {'R6':>7} "
+              f"{'C':>3} {'LIG':>4}  ETAT     DETAIL")
+        print("  " + "-" * 92)
+        for rec in lot.tubes:
+            raw = pairs[id(rec)]
+            tube, tooling, recut, issues = _make(cfg, rec, raw)
+            level = validate.worst(issues)
+            counts[level] += 1
+            note = "; ".join(i.message for i in issues if i.level != validate.INFO) or "conforme"
+            print(f"  {tube.ref:>6} {rec.program_number:>18} {tooling.name:>5} "
+                  f"{tube.diameter or 0:>4g} {tube.declared_length or 0:>7g} "
+                  f"{tube.n_bends:>3} {len(rec.rows):>4}  {level:7s}  {note[:52]}")
+        print()
+    for w in book.warnings:
+        print(f"! {w}")
+    print(f"{counts[validate.INFO]} conforme(s), {counts[validate.WARN]} alerte(s), "
+          f"{counts[validate.ERROR]} erreur(s).")
     return 0
 
 
 def cmd_calibrate(args) -> int:
     cfg = Config.load(args.config)
-    raws = [raw for _, raw in _load(args.source, args.column)]
+    _book, data = _load(args.source, args.column)
+    raws = [raw for _, raw in data]
     usable = [r for r in raws if r.complete and r.declared_length]
     print(f"{len(usable)} programme(s) complet(s) sur {len(raws)} exploitables.\n")
     if not usable:
@@ -74,19 +116,13 @@ def cmd_calibrate(args) -> int:
 
 def cmd_plan(args) -> int:
     cfg = Config.load(args.config)
-    conv = conventions.get(args.convention or cfg.convention)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    data = _load(args.source, args.column)
+    _book, data = _load(args.source, args.column)
 
     made, skipped = 0, 0
-    for row, raw in data:
-        tooling = cfg.for_program(raw.tooling, raw.diameter, row["code_mat"])
-        # la recoupe vient de la LFT, sinon du commentaire du programme
-        recut = float(row.get('recut') or raw.recut or 0.0)
-        tube = conv.build(raw, tooling, recut=recut)
-        issues = validate.check(tube, tooling, recut=recut,
-                                length_tol=cfg.tolerance)
+    for rec, raw in data:
+        tube, tooling, recut, issues = _make(cfg, rec, raw)
 
         blocking = [i for i in issues if i.level == ERROR]
         if blocking and not args.force:
@@ -104,7 +140,8 @@ def cmd_plan(args) -> int:
             continue
 
         issues = validate.check(tube, tooling, cl, recut=recut,
-                                length_tol=cfg.tolerance)
+                                length_tol=cfg.tolerance,
+                                lft_length=rec.number("LONGUEUR"))
         svg = out / f"{tube.ref or raw.name}.svg"
         svg.write_text(render.to_svg(tube, cl, tooling, issues, args.azimuth),
                        encoding="utf-8")
@@ -120,17 +157,13 @@ def cmd_plan(args) -> int:
 def cmd_model(args) -> int:
     """Genere les modeles solides 3D. C'est le livrable pour la sous-traitance."""
     cfg = Config.load(args.config)
-    conv = conventions.get(cfg.convention)
     out = Path(args.output)
     formats = [f for f in ("step", "stl", "brep") if getattr(args, f)] or ["step"]
-    data = _load(args.source, args.column)
+    _book, data = _load(args.source, args.column)
 
     made, skipped = 0, 0
-    for row, raw in data:
-        tooling = cfg.for_program(raw.tooling, raw.diameter, row["code_mat"])
-        recut = float(row.get("recut") or raw.recut or 0.0)
-        tube = conv.build(raw, tooling, recut=recut)
-        issues = validate.check(tube, tooling, recut=recut, length_tol=cfg.tolerance)
+    for rec, raw in data:
+        tube, tooling, recut, issues = _make(cfg, rec, raw)
 
         blocking = [i for i in issues if i.level == ERROR]
         if blocking and not args.force:

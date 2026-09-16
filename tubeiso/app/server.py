@@ -30,7 +30,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from .. import bsa, conventions, geometry, lft, render, solid, stepreader, validate
+from .. import (bsa, conventions, geometry, lft, materials, registry, render,
+                scope, solid, stepreader, validate)
 from ..config import Config, code_mat_diameter
 from ..parsers import crippa
 
@@ -50,6 +51,11 @@ class Piece:
         self.tooling = None
         self.recut = 0.0
         self.issues: list = []
+        self.verdict: scope.Verdict | None = None
+
+    @property
+    def in_scope(self) -> bool:
+        return bool(self.verdict and self.verdict.ok)
 
     @property
     def ref(self) -> str:
@@ -99,32 +105,42 @@ class Session:
         return self.summary()
 
     def _build(self, p: Piece) -> None:
-        """Programme -> geometrie -> controles, pour une piece."""
+        """Perimetre -> programme -> geometrie -> controles, pour une piece."""
         rec = p.record
         conv = conventions.get(self.config.convention)
-        diameter = code_mat_diameter(rec.get("CODE_MAT"))
         lft_length = rec.number("LONGUEUR")
 
-        if rec.straight or not rec.iso.strip():
+        raw = crippa.parse(rec.iso, ref=p.ref) if scope.has_program(rec.iso) else None
+        p.verdict = scope.evaluate(rec, raw)
+        diameter = p.verdict.diameter or code_mat_diameter(rec.get("CODE_MAT"))
+
+        if not p.verdict.ok:
+            # Hors perimetre : on ne fabrique AUCUNE geometrie. Un modele
+            # invente pour un tuyau souple serait pris pour argent comptant.
             tooling = self.config.for_program("", diameter, rec.get("CODE_MAT"))
-            length = lft_length or 0.0
-            p.raw = crippa.parse("", ref=p.ref)
-            p.tube = conv.build_straight(p.ref, length, diameter or tooling.diameter,
-                                         tooling)
-            p.recut = rec.recut
-        else:
-            raw = crippa.parse(rec.iso, ref=p.ref)
-            raw.name = raw.name or p.ref
-            if raw.declared_length is None and lft_length:
-                raw.declared_length = float(lft_length)
-            if raw.diameter is None and diameter:
-                raw.diameter = float(diameter)
-            tooling = self.config.for_program(raw.tooling, raw.diameter,
-                                              rec.get("CODE_MAT"))
-            p.recut = rec.recut or float(raw.recut or 0.0)
             p.raw = raw
-            p.tube = conv.build(raw, tooling, recut=p.recut,
-                                angle_mode=self.config.angle_mode)
+            p.tooling = tooling
+            p.recut = rec.recut
+            p.tube = conv.build_straight(p.ref, lft_length or 0.0,
+                                         diameter or 0.0, tooling)
+            p.tube.list_number = rec.list_number
+            p.tube.program_number = rec.program_number
+            p.issues = [validate.Issue(
+                validate.WARN, "hors_perimetre",
+                f"{p.verdict.reason} — {p.verdict.detail}", "perimetre")]
+            return
+
+        raw.name = raw.name or p.ref
+        if raw.declared_length is None and lft_length:
+            raw.declared_length = float(lft_length)
+        if raw.diameter is None and diameter:
+            raw.diameter = float(diameter)
+        tooling = self.config.for_program(raw.tooling, raw.diameter,
+                                          rec.get("CODE_MAT"))
+        p.recut = rec.recut or float(raw.recut or 0.0)
+        p.raw = raw
+        p.tube = conv.build(raw, tooling, recut=p.recut,
+                            angle_mode=self.config.angle_mode)
 
         p.tube.ref = p.ref
         p.tube.list_number = rec.list_number
@@ -152,12 +168,19 @@ class Session:
                 if p.lot != lot.number:
                     continue
                 t, raw = p.tube, p.raw
+                mat = p.verdict.material if p.verdict else None
                 items.append({
                     "uid": p.uid,
                     "ref": p.ref,
                     "lot": p.lot,
                     "programme": p.record.program_number,
                     "liste": p.record.list_number,
+                    "scope": p.verdict.status if p.verdict else "",
+                    "reason": p.verdict.reason if p.verdict else "",
+                    "reason_label": p.verdict.detail if p.verdict else "",
+                    "nature": p.verdict.kind if p.verdict else "inconnue",
+                    "matiere": mat.designation if mat else None,
+                    "code_mat": mat.code if mat else None,
                     "diameter": t.diameter,
                     "tooling": raw.tooling if raw else "",
                     "head": bsa.HEAD_NAMES.get(raw.head if raw else None, "—"),
@@ -167,7 +190,7 @@ class Session:
                     "complete": t.complete,
                     "straight": t.straight,
                     "rows": len(p.record.rows),
-                    "status": validate.worst(p.issues),
+                    "status": "exclue" if not p.in_scope else validate.worst(p.issues),
                 })
             lots.append({"number": lot.number, "label": lot.label,
                          "count": len(items), "tubes": items})
@@ -228,8 +251,10 @@ class Session:
             "programme": p.record.program_number,
             "liste": p.record.list_number,
             "diameter": tube.diameter,
-            "wall": tooling.wall,
+            "wall": (p.verdict.material.wall if p.verdict and p.verdict.material
+                     else tooling.wall),
             "material": tooling.material,
+            "matiere": p.verdict.as_dict() if p.verdict else None,
             "bend_radius": tooling.clr,
             "tooling": p.raw.tooling if p.raw else "",
             "head": bsa.HEAD_NAMES.get(p.raw.head if p.raw else None, "—"),
@@ -283,6 +308,31 @@ class Session:
         out.sort(key=lambda x: x["column"])
         return out
 
+    # ------------------------------------------------------------------ plan
+    def plan_data(self, p: Piece, cl) -> render.PlanData:
+        """Rassemble ce qui figure sur le plan, y compris le rattachement."""
+        entry = registry.parse_filename(Path(self.source).stem) if self.source \
+            else registry.Entry("", "", "", "nom de fichier")
+        rec = p.record
+        return render.PlanData(
+            tube=p.tube, centerline=cl, tooling=p.tooling, issues=p.issues,
+            material=p.verdict.material if p.verdict else None,
+            groupe=entry.groupe, machine=entry.machine,
+            designation=entry.description,
+            lft=Path(self.source).stem if self.source else "",
+            source_file=str(self.source or ""),
+            embout_1=str(rec.get("EMBOUT_1") or ""),
+            embout_2=str(rec.get("EMBOUT_2") or ""),
+            recoupe_1=float(rec.number("RECOUPE_1") or 0.0),
+            recoupe_2=float(rec.number("RECOUPE_2") or 0.0),
+            recoupe_programme=float((p.raw.recut if p.raw else 0) or 0.0),
+            lft_length=rec.number("LONGUEUR"),
+            quantite=rec.number("QTE_DEB"),
+            remarque=str(rec.get("REMARQUE") or ""),
+            handedness=self.config.handedness,
+            angle_mode=self.config.angle_mode,
+        )
+
     # ---------------------------------------------------------------- exports
     def export(self, uids: list[str], out_dir: str, formats: list[str]) -> dict:
         out = Path(out_dir).expanduser()
@@ -295,6 +345,10 @@ class Session:
                 continue
             # deux lots peuvent porter le meme repere : le nom de fichier doit
             # rester unique, donc on prefixe par le lot quand il y en a plusieurs
+            if not p.in_scope:
+                failed.append({"ref": p.ref,
+                               "error": f"hors périmètre : {p.verdict.detail}"})
+                continue
             name = p.ref
             if self.book and len(self.book.lots) > 1 and p.lot:
                 name = f"{p.lot}_{p.ref}"
@@ -305,11 +359,14 @@ class Session:
                     for f in solid.export(p.tube, cl, out, p.tooling, cad,
                                           basename=name):
                         done.append(str(f))
-                if "svg" in formats:
-                    q = out / f"{name}.svg"
-                    q.write_text(render.to_svg(p.tube, cl, p.tooling, p.issues),
-                                 encoding="utf-8")
-                    done.append(str(q))
+                if "pdf" in formats or "svg" in formats:
+                    data = self.plan_data(p, cl)
+                    if "pdf" in formats:
+                        done.append(str(render.to_pdf(data, out / f"{name}.pdf")))
+                    if "svg" in formats:
+                        q = out / f"{name}.svg"
+                        q.write_text(render.to_svg(data), encoding="utf-8")
+                        done.append(str(q))
                 if "dxf" in formats:
                     render.to_dxf(p.tube, cl, str(out / f"{name}.dxf"))
                     done.append(str(out / f"{name}.dxf"))

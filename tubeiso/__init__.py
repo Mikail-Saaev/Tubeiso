@@ -1,9 +1,11 @@
-"""tubeiso : programmes ISO de cintreuse -> plans isometriques de tuyauterie."""
+"""tubeiso : programmes ISO de cintreuse -> plans de fabrication et modeles 3D."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-from . import bsa, calibrate, config, conventions, geometry, model, render, validate
+from . import (batch, bsa, calibrate, config, conventions, geometry, lft,
+               materials, model, registry, render, scope, sheet, validate)
 from .parsers import crippa
 
-__all__ = ["bsa", "calibrate", "config", "conventions", "geometry", "model",
-           "render", "validate", "crippa"]
+__all__ = ["batch", "bsa", "calibrate", "config", "conventions", "geometry",
+           "lft", "materials", "model", "registry", "render", "scope", "sheet",
+           "validate", "crippa"]

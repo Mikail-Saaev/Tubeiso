@@ -1,4 +1,5 @@
 """Tests d'invariants. L'essentiel : un aller-retour LRA -> 3D -> developpe."""
+import json
 import math
 import os
 import sys
@@ -243,6 +244,266 @@ def test_controle_DS_detecte_un_faux_rayon():
 
 def np_norm(v):
     return float((v ** 2).sum() ** 0.5)
+
+
+# ---------------------------------------------------------------- v6 : matieres
+
+def test_matiere_rigide_vs_souple():
+    """La distinction rigide / souple vient du scan des codes matiere BSA."""
+    from tubeiso import materials
+    assert materials.kind_of("293-421-008") == materials.RIGIDE
+    assert materials.kind_of("769-421-035") == materials.SOUPLE
+    # meme prefixe 750, deux familles : le deuxieme triplet tranche
+    assert materials.lookup("750 423 012").family == "Pneumatique"
+    assert materials.lookup("750 421 012").family == "Forflex"
+    assert materials.diameter("293-421-008") == 8
+    assert materials.diameter("769-421-035") is None, "un flexible n'a pas de Ø cintrable"
+    assert materials.lookup("293-421-008").wall == 1.0
+    # famille deduite pour un code absent du catalogue
+    inconnu = materials.lookup("778-421-099")
+    assert inconnu is not None and inconnu.kind == materials.SOUPLE
+    # Ø22 : rigide, mais BSA ne le cintre plus
+    assert materials.lookup("293-421-022").kind == materials.RIGIDE
+    assert not materials.lookup("293-421-022").bendable
+
+
+def test_perimetre_progcrippa():
+    """Seuls les tubes rigides porteurs d'une PROGCRIPPA sont traites."""
+    from tubeiso import lft, scope
+    from tubeiso.parsers import crippa
+
+    class Rec:
+        def __init__(self, code, iso="", droit=False, main=False):
+            self.cells = {"CODE_MAT": code}
+            self.iso = iso
+            self.straight = droit
+            self.handmade = main
+
+        def get(self, col, default=None):
+            return self.cells.get(col, default)
+
+    v = scope.evaluate(Rec("769-421-035", PROG))
+    assert not v.ok and v.reason == scope.MATIERE_SOUPLE
+
+    v = scope.evaluate(Rec("293-421-006", ""))
+    assert not v.ok and v.reason == scope.SANS_PROGRAMME
+
+    v = scope.evaluate(Rec("293-421-006", "", droit=True))
+    assert not v.ok and v.reason == scope.TUBE_DROIT
+
+    v = scope.evaluate(Rec("293-421-006", "", main=True))
+    assert not v.ok and v.reason == scope.FAIT_MAIN
+
+    raw = crippa.parse(PROG)
+    v = scope.evaluate(Rec("293-421-006", PROG), raw)
+    assert v.ok and v.diameter == 6 and v.kind == "rigide"
+
+    tronque = PROG.replace("M30", "")
+    v = scope.evaluate(Rec("293-421-006", tronque), crippa.parse(tronque))
+    assert not v.ok and v.reason == scope.PROGRAMME_TRONQUE
+
+
+# --------------------------------------------------- v6 : correctifs de lecture
+
+def test_cycle_de_chargement_L4():
+    """[DOC 3.1] L4 charge les tubes longs : il porte R6 et R12 comme L1."""
+    from tubeiso.parsers import crippa
+    prog = PROG.replace("L1 R1=155", "L4 R1=155")
+    raw = crippa.parse(prog)
+    assert raw.loading == "L4"
+    assert raw.init["R12"] == 39.5, "R12 doit etre lu sur un cycle L4"
+    assert raw.declared_length == 263.0
+    assert crippa.parse(PROG).loading == "L1"
+
+
+def test_faux_pli_a_zero_degre_fusionne():
+    """[DOC 5.3] Un R15=0 ne plie rien : les deux segments n'en font qu'un."""
+    from tubeiso import bsa, conventions
+    from tubeiso.model import Tooling
+    from tubeiso.parsers import crippa
+
+    # Repere 161 du lot Masterflex, tel quel : le dernier bloc est un L3 a
+    # R15=0, et le DS du commentaire vaut le segment droit RECOLLE.
+    prog = """%MPF 161
+(Masterflex HD, Ø10, cassette, L=1444, ds=1306)
+L510
+L1 R1=155 R4=20 R6=1444 R7=2 R12=30.5 R31=100 R33=279.5 M70
+N1 L2 R15=92
+G91 G0 Y-35 G90 C0
+G91 G0 Y-4 B90
+N2 L2 R15=90
+G91 G0 Y-35 G90 C0
+G91 G0 Y-921
+N3 L3 R15=0 R41=23 R43=300
+M30
+"""
+    raw = crippa.parse(prog)
+    tooling = Tooling(name="Ø10", diameter=10, clr=23, wall=1.0, elongation=5.0)
+    tube = conventions.get("bsa").build(raw, tooling)
+    assert tube.n_bends == 2, "le pli a 0° ne doit pas compter comme un coude"
+    assert len(tube.straights) == 3
+    assert tube.false_bends, "la fusion doit etre tracee"
+    # le dernier segment recolle retombe sur le DS du commentaire, a l'arrondi
+    assert abs(tube.straights[-1] - 1306) < 1.0, tube.straights
+
+
+def test_r7_deja_present_ne_declenche_pas_d_alerte():
+    """[XLSM Feuil2!B15] Le R7=0 vit dans un bloc N, pas dans la ligne L1."""
+    from tubeiso import conventions, validate
+    from tubeiso.model import Tooling
+    from tubeiso.parsers import crippa
+
+    raw = crippa.parse(PROG)            # le 412 porte R7=0 dans le bloc N1
+    tooling = Tooling(name="Ø6", diameter=6, clr=11, wall=1.0, elongation=5.0,
+                      min_straight=11)
+    tube = conventions.get("bsa").build(raw, tooling)
+    assert tube.r7_released
+    codes = [i.code for i in validate.check(tube, tooling)]
+    assert "r7_manquant" not in codes
+
+
+def test_angles_au_demi_degre():
+    """Le programmeur ecrit au demi-degre : 92.5 en Ø8 doit rester lisible."""
+    from tubeiso import bsa
+    assert bsa.real_angle(92.5, 8)[0] == 90.5
+    assert bsa.real_angle(46, 4)[0] == 45.0, "l'exemple meme de [DOC 5.4]"
+    assert bsa.real_angle(92, 12)[0] == 90.0
+    assert bsa.real_angle(25.5, 6)[0] == 25.0
+    # l'aller-retour reste exact sur tous les angles entiers
+    for d in (4, 6, 8, 10, 12, 15, 16, 18):
+        for theta in range(5, 186):
+            r15 = bsa.programmed_angle(theta, d)
+            assert bsa.real_angle(r15, d)[0] == theta, (d, theta, r15)
+
+
+def test_tables_du_classeur_pour_le_diametre_16():
+    """[XLSM Feuil2!B47] Ø16 : droite mini 36 mm, et non 30 comme le Ø15."""
+    from tubeiso import bsa
+    assert bsa.MIN_STRAIGHT[16] == 36
+    assert bsa.R15_FOR_90[16] == 92.5, "sans quoi le Ø16 sort sans compensation"
+    assert bsa.real_angle(92.5, 16)[0] == 90.0
+
+
+# ------------------------------------------------------------ v6 : rattachement
+
+def test_rattachement_groupe_machine():
+    from tubeiso import registry
+    e = registry.parse_filename("BCH_PLATINE_82_0889_0877-0000-CL")
+    assert e.groupe == "BSH", "le prefixe de fichier BCH designe le groupe BSH"
+    assert e.machine == "PLATINE_82_0889"
+    assert registry.list_number_from("BCH_PLATINE_82_0889_0877-0000-CL") == "0877-0000-CL"
+    assert registry.safe_name("A/B:C*?") == "A_B_C"
+    assert registry.parse_filename("FLX_MASTERFLEX_HD_EXPERFLEX_0227_0198-0002-JV").groupe == "FLX"
+
+
+# ------------------------------------------------------------------ v6 : le plan
+
+def test_plan_pdf_autoportant():
+    """Le PDF doit exister, faire deux pages, et porter les donnees cles."""
+    import tempfile
+
+    from tubeiso import conventions, geometry, render, validate
+    from tubeiso.model import Tooling
+    from tubeiso.parsers import crippa
+
+    raw = crippa.parse(PROG)
+    tooling = Tooling(name="Ø6", diameter=6, clr=11, wall=1.0, elongation=5.0,
+                      material="Tube Ermeto zingué 6/4", min_straight=11)
+    tube = conventions.get("bsa").build(raw, tooling)
+    cl = geometry.build(tube)
+    issues = validate.check(tube, tooling, cl)
+    data = render.PlanData(tube=tube, centerline=cl, tooling=tooling, issues=issues,
+                           groupe="FLX", machine="ESSAI", lft="ESSAI_0000-0000-XX")
+
+    svg = render.to_svg(data)
+    assert svg.startswith("<svg") and "PLAN DE FABRICATION" in svg
+    assert "TABLE LRA" not in svg, "la page 1 ne porte pas la table LRA"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = render.to_pdf(data, Path(tmp) / "412.pdf")
+        blob = out.read_bytes()
+        assert blob.startswith(b"%PDF"), "en-tete PDF absent"
+        assert blob.count(b"/Type /Page") >= 2 or blob.count(b"/Type/Page") >= 2, \
+            "le plan doit faire deux pages"
+        assert len(blob) > 3000
+
+        cahier = render.booklet([data], Path(tmp) / "cahier.pdf", "ESSAI",
+                                [{"repere": "9", "motif": "matière_souple",
+                                  "detail": "Uniflex 44/35"}])
+        assert cahier.read_bytes().startswith(b"%PDF")
+
+
+def test_segments_du_plan_suivent_le_tube():
+    """Les cotes du plan doivent porter sur les vrais segments droits."""
+    from tubeiso import geometry, render
+    from tubeiso.model import Bend, TubeProgram
+
+    tube = TubeProgram(ref="T", diameter=8.0, straights=[50.0, 60.0, 70.0],
+                       bends=[Bend(angle=90, rotation=0, clr=14),
+                              Bend(angle=45, rotation=90, clr=14)])
+    cl = geometry.build(tube)
+    spans = render.straight_spans(cl, tube.n_bends)
+    assert len(spans) == len(tube.straights)
+    for (a, b), attendu in zip(spans, tube.straights):
+        longueur = float(((b - a) ** 2).sum() ** 0.5)
+        assert abs(longueur - attendu) < 1e-6, (longueur, attendu)
+
+
+# ------------------------------------------------------------- v6 : campagne
+
+def test_campagne_range_et_indexe():
+    """Une campagne produit l'arborescence, l'index et le rapport."""
+    import tempfile
+
+    from openpyxl import Workbook, load_workbook
+
+    from tubeiso import batch
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "sources"
+        src.mkdir()
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["REP", "CODE_MAT", "LONGUEUR", "LISTE", "PROGRAMME",
+                   "PROGCRIPPA", "DROIT"])
+        ws.append(["412", "293-421-006", 263, "0792-0002-JV", "792_JV-412",
+                   PROG, "Faux"])
+        ws.append(["900", "769-421-035", 5000, "0792-0002-JV", "", "", "Vrai"])
+        ws.append(["901", "293-421-006", 300, "0792-0002-JV", "", "", "Vrai"])
+        wb.save(src / "BCH_ESSAI_0001_0792-0002-JV.xlsx")
+
+        out = Path(tmp) / "biblio"
+        campagne = batch.run([src], out, batch.Options(models=False))
+        s = campagne.summary()
+        assert s["pieces"] == 3 and s["traitees"] == 1 and s["exclues"] == 2
+        assert s["plans"] == 1
+
+        lot = out / "BSH" / "ESSAI_0001" / "BCH_ESSAI_0001_0792-0002-JV"
+        assert (lot / "plans" / "412.pdf").exists()
+        assert (lot / "donnees" / "412.json").exists()
+        assert (lot / "BCH_ESSAI_0001_0792-0002-JV_cahier.pdf").exists()
+        assert not (lot / "plans" / "900.pdf").exists(), \
+            "un tuyau souple ne doit produire aucun plan"
+
+        donnees = json.loads((lot / "donnees" / "412.json").read_text("utf-8"))
+        assert donnees["matiere"]["nature"] == "rigide"
+        assert donnees["cintrage"]["lra"][0]["r15_programme"] == 46
+        assert len(donnees["geometrie"]["sommets_xyz"]) == tube_sommets(donnees)
+
+        index = load_workbook(out / "INDEX.xlsx")
+        assert index.sheetnames == ["Tubes", "LFT", "Campagne"]
+        assert index["Tubes"].max_row == 4          # en-tete + 3 pieces
+        motifs = {index["Tubes"].cell(row=r, column=9).value
+                  for r in range(2, 5)}
+        assert "matière_souple" in motifs and "tube_droit_sans_programme" in motifs
+
+        # reprise : la meme campagne relancee ne refait rien
+        again = batch.run([src], out, batch.Options(models=False))
+        assert again.summary()["fichiers_sautes"] == 1
+
+
+def tube_sommets(donnees: dict) -> int:
+    return len(donnees["cintrage"]["lra"]) + 2
 
 
 def _run() -> int:

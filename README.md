@@ -3,15 +3,22 @@
 Génération de **modèles 3D exploitables** de tubes cintrés à partir des
 programmes ISO (G-code, ISO 6983) d'une cintreuse Crippa / SINUMERIK 840D.
 
-Livrable principal : un fichier **STEP AP214** par tube, prêt pour la
-sous-traitance. Les plans 2D sont un livrable secondaire, de contrôle.
+Deux livrables par tube, faits pour partir tels quels chez un sous-traitant :
+
+* un **plan PDF autoportant** de deux pages A4, qui suffit à fabriquer la pièce
+  sans aucune information complémentaire ;
+* un fichier **STEP AP214**, solide creux exact, avec sa fibre neutre nommée.
 
 Trois interfaces : une **application graphique** avec vue 3D et lecteur STEP,
-une **ligne de commande** pour le traitement par lot, et une **bibliothèque
-Python**. Voir `DEMARRAGE.md` pour l'installation.
+une **ligne de commande** dont la commande `batch` traite des milliers de LFT
+d'un coup, et une **bibliothèque Python**. Voir `DEMARRAGE.md`.
 
 ```
-LFT.xlsx ──lecteur──▶ lots + tubes ──parseur──▶ LRA brut ──convention BSA──▶ LRA géométrique
+LFT.xlsx ──lecteur──▶ lots + tubes ──filtre périmètre──▶ tubes avec PROGCRIPPA
+                                          │
+                                   hors périmètre : motif tracé, aucun fichier
+                                          │
+                          parseur ──▶ LRA brut ──convention BSA──▶ LRA géométrique
                                                               │
                                                      contrôles machine
                                                               │
@@ -42,9 +49,13 @@ pip install -r requirements.txt
 ```bash
 python -m tubeiso.cli init                              # crée tooling.json
 python -m tubeiso.cli inspect   LFT.xlsx                # diagnostic, ne trace rien
-python -m tubeiso.cli calibrate LFT.xlsx                # cherche rayon + convention
-python -m tubeiso.cli model     LFT.xlsx -c tooling.json -o modeles_3d/
-python -m tubeiso.cli plan      LFT.xlsx -c tooling.json -o plans/ --dxf
+python -m tubeiso.cli calibrate LFT.xlsx                # vérifie Rm sur un corpus
+python -m tubeiso.cli model     LFT.xlsx -o modeles_3d/ # solides STEP
+python -m tubeiso.cli plan      LFT.xlsx -o plans/      # plans PDF + cahier du lot
+
+# la campagne : des milliers de LFT vers une bibliothèque rangée
+python -m tubeiso.cli batch  D:\\LFT -o D:\\bibliotheque_tubes ^
+       -r Repertoire_Machines_Consolide.xlsm --workers 6
 ```
 
 ## L'application
@@ -220,24 +231,169 @@ Deux notions à ne jamais confondre, et que le code sépare explicitement :
 Un même repère peut exister dans deux lots : les pièces sont donc identifiées
 par un `uid` stable, jamais par leur repère, et le doublon est signalé.
 
+## Le plan PDF
+
+Le plan est le seul document que verra le fabricant. Il est écrit pour se
+suffire à lui-même : quelqu'un qui n'a jamais entendu parler de la Crippa doit
+pouvoir cintrer la pièce à partir de ces deux pages.
+
+**Page 1 — la pièce.** Vue isométrique cotée, avec la longueur de chaque
+segment droit, l'angle de chaque coude et sa rotation d'axe B ; trois vues
+orthogonales (face, dessus, gauche) ; les extrémités nommées A et B ;
+l'encombrement. À droite, quatre blocs : matière, débit, cintrage, extrémités.
+Puis le cartouche : repère, programme, lot, LFT, groupe, machine, désignation,
+échelle, indice, et le verdict des contrôles automatiques.
+
+**Page 2 — les données.** La table LRA complète (longueur, rotation, angle
+réel, R15 programmé, rayon, cumul développé), les coordonnées XYZ de tous les
+points d'intersection, le détail des extrémités avec les profondeurs de forage
+Vögel et d'emmanchement Ermeto, la liste des contrôles, le programme ISO
+d'origine, et sept notes de fabrication.
+
+Ces notes sont la partie la moins spectaculaire et la plus importante. Elles
+disent, noir sur blanc, ce qu'un plan de cintrage laisse d'ordinaire implicite :
+
+* les longueurs sont des cotes **tangente à tangente**, pas des cotes de
+  sommet — la confusion coûte plusieurs millimètres par coude ;
+* la colonne « angle réel » est l'angle du tube fini ; la colonne « R15 » est
+  la consigne Crippa, **qui contient déjà sa surcompensation d'élasticité**.
+  Un autre moyen de production doit repartir de l'angle réel et appliquer la
+  sienne. C'est l'erreur qui produit des pièces fausses en série ;
+* la rotation B s'applique **avant** le cintrage du coude concerné, et B ± 360
+  sont équivalents ;
+* le rayon Rm est celui de la **fibre neutre**.
+
+Le même dessin sort en SVG pour l'aperçu de l'application et en PDF pour la
+sous-traitance : `sheet.py` expose une surface de dessin commune, et la mise en
+plan est écrite une seule fois. Aucune cote ne peut diverger entre les deux.
+
+Une pièce dont un contrôle est en erreur reçoit un **bandeau rouge en haut de
+la page 1** qui nomme l'anomalie, en plus de la mention dans le cartouche.
+`batch` trace le plan quand même — il est souvent la meilleure façon de
+comprendre ce qui cloche — mais il est impossible de le confondre avec un plan
+bon. `plan`, en usage manuel, refuse au contraire de tracer, sauf `--force`.
+
+`plan` et `batch` produisent en plus un **cahier par LFT** : une couverture qui
+récapitule le lot, puis tous les plans à la suite. C'est ce qu'on imprime pour
+l'atelier ; les PDF individuels sont ce qu'on envoie pièce par pièce.
+
+## Matières souples et matières rigides
+
+`materials.py` transcrit le tableau « N° matière tube et tuyau » de BSA. Six
+familles, et une seule est cintrée sur la Crippa :
+
+| Famille | Préfixe | Nature | Cintrable |
+|---|---|---|---|
+| Ermeto | 293, 416 | tube acier rigide | oui, de Ø4 à Ø18 |
+| Pneumatique | 750 42*x*, 758 423 | tuyau souple | non |
+| Lubrification | 751, 758 421 | tuyau souple | non |
+| Arrosage | 778 | tuyau souple | non |
+| Forflex spiralé acier | 750 421 | tuyau souple | non |
+| Uniflex noir | 769 | tuyau souple | non |
+
+Le deuxième triplet du code n'est pas décoratif : `750 421 012` est un Forflex
+Ø20/13 alors que `750 423 012` est un tuyau pneumatique Ø12/8. Un code absent
+du catalogue est quand même classé par son préfixe — c'est la **nature** qui
+décide du sort de la pièce, et elle se lit sur trois chiffres.
+
+Les Ø22 à Ø38 existent en Ermeto mais BSA ne les cintre plus : ils sont donc
+rigides et hors périmètre, ce que l'application distingue explicitement d'un
+tuyau souple.
+
+## Le périmètre : seulement ce qui a une PROGCRIPPA
+
+Une pièce sans programme n'a pas de géométrie. En fabriquer une quand même
+revient à livrer un modèle inventé, ce qui est plus dangereux qu'un modèle
+absent. `scope.py` tranche avant tout calcul, et chaque exclusion porte un
+motif stable :
+
+| Motif | Ce qu'il signifie |
+|---|---|
+| `matière_souple` | tuyau souple : ni cintré, ni modélisable |
+| `tube_droit_sans_programme` | case DROIT cochée, aucun programme |
+| `plié_à_la_main` | case FAITMAIN : façonné hors Crippa |
+| `sans_programme` | colonne PROGCRIPPA vide |
+| `programme_tronqué` | pas de M30 : géométrie fausse mais plausible |
+| `hors_outillage_crippa` | diamètre rigide sans matrice BSA |
+| `diamètre_introuvable` | ni dans le programme, ni dans CODE_MAT |
+
+Rien n'est perdu pour autant : les pièces exclues figurent dans l'index, dans
+le récapitulatif du lot et sur la couverture du cahier, avec leur motif. Une
+campagne rend compte de **100 % des lignes lues**.
+
+Dans l'application, chaque pièce porte une pastille `rigide` ou `souple`, les
+pièces hors périmètre sont estompées, et l'onglet *Cotations* ouvre sur un bloc
+**Matière** qui donne la famille, le code BSA, la paroi et le motif éventuel.
+
+## La campagne : des milliers de LFT
+
+```
+tubeiso batch <dossiers…> -o bibliotheque -r Repertoire_Machines_Consolide.xlsm
+```
+
+La commande parcourt récursivement les dossiers, lit chaque `.xlsx` / `.xlsm`,
+et écrit :
+
+```
+bibliotheque/
+  INDEX.xlsx                       une ligne par tube, filtrable, avec les liens
+  rapport.csv                      le même contenu en texte
+  journal.txt                      ce qui s'est passé, fichier par fichier
+  BSH/PLATINE_82_0889/BCH_PLATINE_82_0889_0877-0000-CL/
+      …_cahier.pdf                 tous les plans du lot
+      …_recapitulatif.csv          les pièces du lot
+      plans/223.pdf                le plan autoportant
+      modeles_3d/223.stp           le solide
+      donnees/223.json             toutes les données techniques
+```
+
+Le rattachement **Groupe → Machine → LFT** vient de
+`Repertoire_Machines_Consolide.xlsm`, qui associe chaque code LFT — c'est-à-dire
+chaque nom de fichier — à sa machine et à sa description. Sans ce fichier, le
+nom se suffit : `BCH_PLATINE_82_0889_0877-0000-CL` donne le groupe BSH (le
+préfixe de fichier `BCH` désigne le groupe `BSH`), la machine `PLATINE_82_0889`
+et la liste `0877-0000-CL`.
+
+`INDEX.xlsx` porte trois onglets — *Tubes*, *LFT*, *Campagne* — et vingt-cinq
+colonnes par tube, dont les chemins cliquables vers le plan, le modèle et le
+JSON. C'est la table de la bibliothèque : un filtre sur `Groupe` + `Contrôle`
+sort en deux clics toutes les pièces d'un groupe à revoir.
+
+Trois propriétés comptent à cette échelle :
+
+* **reprenable.** Une LFT déjà traitée est sautée, sauf `--force`. Une campagne
+  interrompue redémarre où elle s'était arrêtée.
+* **tolérante.** Un classeur illisible est journalisé et la campagne continue.
+* **parallèle.** `--workers 6` répartit les fichiers sur plusieurs processus.
+  `--no-3d` saute les solides et va cinq fois plus vite, pour un premier
+  passage de reconnaissance.
+
+Commencer par `--limit 20` sur un échantillon : le journal dit immédiatement
+quelle proportion du parc a une PROGCRIPPA exploitable.
+
 ## Ce qui reste à faire
 
-1. **Réexporter les programmes tronqués** à 255 caractères. L'extraction
-   `07920002jv.xlsx` montre que la base, elle, n'est pas tronquée.
-2. **Vérifier le sens de rotation** sur une pièce réelle. Un seul réglage
+1. **Vérifier le sens de rotation** sur une pièce réelle. Un seul réglage
    global, `handedness` ; une erreur de signe donne une pièce en miroir,
-   plausible et immontable.
-3. **Modéliser les extrémités** : embouts `V04`/`V06`/`V08` (sertissage Vögel)
-   et profondeurs de forage du chap. 8.1.2, qui conditionnent les longueurs
-   du premier et du dernier segment.
-4. **Traitement par lot** sur les 10 000 programmes, avec un rapport
-   récapitulatif des pièces conformes, alertées et rejetées.
+   plausible et immontable. Une seule mesure suffit à trancher, et c'est le
+   dernier point qui empêche de signer les plans les yeux fermés.
+2. **La séquence de changement de tête** [DOC 5.6] contient des déplacements Y
+   de repositionnement que le parseur compte encore comme de l'avance tube.
+   Huit programmes sur cent quarante-cinq sont concernés dans le corpus d'essai.
+3. **Déduire les profondeurs d'emmanchement** des longueurs du premier et du
+   dernier segment quand les extrémités sont serties. Les tables sont en place
+   et figurent sur le plan ; la règle de déduction reste à confirmer avec le
+   bureau des méthodes.
+4. **Les indices de révision.** Le cartouche porte un indice fixe `A` : il
+   faudra le faire vivre le jour où un plan est réédité après modification.
 
 ## Structure
 
 | Fichier | Rôle |
 |---|---|
 | `model.py` | Modèle pivot : `Tooling`, `Bend`, `TubeProgram` |
+| `materials.py` | Catalogue matière BSA : familles, rigide / souple, cintrable |
+| `scope.py` | Périmètre : qui est traité, qui est exclu et pourquoi |
 | `parsers/crippa.py` | Lecture syntaxique du dialecte Crippa, sans interprétation |
 | `lft.py` | Lecture du LFT : en-tête, regroupement multi-lignes, lots |
 | `bsa.py` | Constantes machine, modèle de longueur et retour élastique |
@@ -246,7 +402,10 @@ par un `uid` stable, jamais par leur repère, et le doublon est signalé.
 | `validate.py` | Contrôles : développé, droites, angles, auto-collision |
 | `solid.py` | Solide 3D balayé et exports STEP / STL / BREP |
 | `stepreader.py` | Lecture STEP : maillage et extraction analytique exacte |
-| `render.py` | Plan isométrique SVG (A4) et export DXF |
+| `sheet.py` | Surface de dessin en mm, rendue en SVG ou en PDF |
+| `render.py` | Mise en plan deux pages, cahier de lot, export DXF |
+| `registry.py` | Rattachement LFT → groupe → machine |
+| `batch.py` | Campagne : arborescence, `INDEX.xlsx`, journal, reprise |
 | `calibrate.py` | Vérification de `Rm` sur un corpus |
 | `config.py` | `tooling.json` et lecture du fichier LFT |
 | `cli.py` | Ligne de commande |

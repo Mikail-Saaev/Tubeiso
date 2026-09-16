@@ -75,6 +75,8 @@ class TubeProgram:
     complete: bool = True
     straight: bool = False         # tube laisse droit, sans programme
     angle_mode: str = "entier"     # mode de correction d'elasticite applique
+    r7_released: bool = False      # un R7=0 figure dans un bloc de cintrage
+    false_bends: list[float] = field(default_factory=list)  # faux plis a 0° fusionnes
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:

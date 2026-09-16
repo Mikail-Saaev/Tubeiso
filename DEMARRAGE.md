@@ -89,18 +89,85 @@ Pour une vraie fenêtre d'application plutôt qu'un onglet de navigateur :
 
 ## 3. La ligne de commande
 
-Pour traiter des milliers de programmes sans interface.
-
 ```
-python -m tubeiso.cli inspect   LFT.xlsx                       # diagnostic
-python -m tubeiso.cli model     LFT.xlsx -o modeles_3d         # solides STEP
-python -m tubeiso.cli plan      LFT.xlsx -o plans --dxf        # plans 2D
-python -m tubeiso.cli calibrate LFT.xlsx                       # contrôle de Rm
-python -m tubeiso.cli init                                     # tooling.json
+python -m tubeiso.cli inspect   LFT.xlsx                  # diagnostic, n'écrit rien
+python -m tubeiso.cli plan      LFT.xlsx -o plans         # plans PDF + cahier du lot
+python -m tubeiso.cli model     LFT.xlsx -o modeles_3d    # solides STEP
+python -m tubeiso.cli calibrate LFT.xlsx                  # contrôle de Rm
+python -m tubeiso.cli init                                # tooling.json
 ```
 
-Commencez toujours par `inspect` sur un fichier inconnu : il ne trace rien et
-signale immédiatement les programmes tronqués.
+Commencez toujours par `inspect` sur un fichier inconnu : il ne trace rien, et
+il vous dit tout de suite combien de pièces entrent dans le périmètre.
+
+---
+
+## 4. La campagne, pour des milliers de LFT
+
+C'est la commande qui transforme un dossier de LFT en bibliothèque rangée.
+
+```
+python -m tubeiso.cli batch D:\LFT -o D:\bibliotheque_tubes ^
+       -r D:\Repertoire_Machines_Consolide.xlsm --workers 6
+```
+
+ou, avec l'exécutable :
+
+```
+tubeiso.exe --cli batch D:\LFT -o D:\bibliotheque_tubes -r Repertoire.xlsm
+```
+
+| Option | Effet |
+|---|---|
+| `-r`, `--repertoire` | `Repertoire_Machines_Consolide.xlsm` : rattache chaque LFT à son groupe et à sa machine |
+| `--limit 20` | s'arrêter après 20 fichiers, pour un essai |
+| `--no-3d` | sauter les solides STEP — environ cinq fois plus rapide |
+| `--no-plans` | ne produire que les modèles et les données |
+| `--workers 6` | répartir les fichiers sur 6 processus |
+| `--force` | retraiter les LFT déjà faites |
+| `--stl` `--brep` `--dxf` | formats supplémentaires |
+
+**Faites toujours un premier passage en reconnaissance :**
+
+```
+python -m tubeiso.cli batch D:\LFT -o D:\essai --limit 20 --no-3d
+```
+
+Vingt fichiers, aucun solide : quelques secondes. Ouvrez ensuite
+`D:\essai\journal.txt`, qui donne la proportion de pièces exploitables et les
+motifs d'exclusion. C'est là qu'on voit si le parc est prêt, avant d'engager
+plusieurs heures de calcul.
+
+### Ce que vous obtenez
+
+```
+bibliotheque_tubes/
+  INDEX.xlsx                         ← commencez ici
+  rapport.csv
+  journal.txt
+  BSH/
+    PLATINE_82_0889/
+      BCH_PLATINE_82_0889_0877-0000-CL/
+        BCH_…_cahier.pdf             tous les plans du lot, à imprimer
+        BCH_…_recapitulatif.csv
+        plans/223.pdf                le plan à envoyer au sous-traitant
+        modeles_3d/223.stp           le solide
+        donnees/223.json             toutes les données techniques
+```
+
+`INDEX.xlsx` est la porte d'entrée : une ligne par tube, un filtre sur chaque
+colonne, et les chemins du plan, du modèle et du JSON cliquables. Trois
+onglets : *Tubes*, *LFT* et *Campagne*.
+
+La campagne est **reprenable** : relancée sur le même dossier de sortie, elle
+saute les LFT déjà traitées. Un fichier illisible n'interrompt rien, il est
+journalisé.
+
+### Combien de temps
+
+Comptez environ **une seconde par tube** avec les solides STEP, et cinq fois
+moins sans. Sur 3 000 programmes, prévoyez donc moins d'une heure avec
+`--workers 6`, et quelques minutes avec `--no-3d`.
 
 ---
 
@@ -162,9 +229,15 @@ chaque module et l'erreur exacte qui l'empêche de se charger.
 **`colonne PROGCRIPPA absente`** — votre colonne porte un autre nom. En ligne
 de commande, ajoutez `--column NOM_DE_LA_COLONNE`.
 
-**Toutes les pièces sont ignorées** — lisez le motif affiché. Si c'est
-« programme tronqué », le problème vient de l'export Excel : un champ texte
-limité à 255 caractères quelque part dans la chaîne, pas de l'outil.
+**Beaucoup de pièces « hors périmètre »** — c'est normal, et c'est voulu :
+l'application ne traite que les tuyaux équipés d'une PROGCRIPPA. Le motif est
+affiché pour chacune. `matière_souple` désigne un tuyau qui n'est pas cintré
+sur la Crippa ; `tube_droit_sans_programme` un tube laissé droit ;
+`programme_tronqué` un export Excel qui a coupé le champ texte à 255
+caractères — là, le problème est dans la chaîne d'export, pas dans l'outil.
+
+**Le plan PDF ne se génère pas** — `pip install reportlab`. Le PDF est la
+seule fonction qui en dépend ; tout le reste tourne sans.
 
 **`balayage impossible`** — un segment droit est plus court que le rayon de
 cintrage, ou deux coudes se suivent sans droite entre eux. Le message nomme la
@@ -204,4 +277,4 @@ qu'un paquet fragile qui casse chez un client est pire qu'un paquet volumineux.
 | `build_windows.bat`, `build_unix.sh` | construction locale |
 | `exemple_programme_410.txt` | programme complet, pour tester |
 | `exemple_plans/`, `exemple_modeles_3d/` | sorties de référence |
-| `tests/test_tubeiso.py` | doit afficher 10 `ok` |
+| `tests/test_tubeiso.py` | doit afficher une trentaine de `ok` |

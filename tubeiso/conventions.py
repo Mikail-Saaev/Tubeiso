@@ -104,6 +104,17 @@ class BSAConvention:
             bends.append(Bend(angle=true, rotation=rot, clr=clr,
                               r15=r15[i], springback=delta))
 
+        # --- faux pli a 0 degre [DOC 5.3 ; XLSM Feuil2!B53]
+        # « Le dernier segment ne doit pas faire plus de 450 mm sinon faire un
+        # faux pli a 0 deg. » Ce bloc ne plie rien : le tube reste droit de part
+        # et d'autre. Le conserver couperait un segment reel en deux, fausserait
+        # le controle DS et ferait croire a un coude au sous-traitant.
+        straights, bends, merged = _merge_zero_bends(straights, bends)
+        for length in merged:
+            warnings.append(
+                f"faux pli à 0° fusionné : segment droit réel de {length:.1f} mm "
+                "[DOC 5.3]")
+
         if angle_mode != "brut" and any(b.springback for b in bends):
             total = sum(b.springback for b in bends)
             warnings.append(
@@ -116,6 +127,8 @@ class BSAConvention:
             declared_length=raw.declared_length, ds=raw.ds, comment=raw.comment,
             straights=straights, bends=bends, params=dict(raw.init),
             source=raw.source, complete=raw.complete, angle_mode=angle_mode,
+            r7_released=any(b.params.get("R7") == 0 for b in raw.blocks),
+            false_bends=merged,
             warnings=warnings,
         )
 
@@ -132,6 +145,26 @@ class BSAConvention:
             comment="tube droit, sans programme de cintrage",
             straights=[float(length)], bends=[], complete=True, straight=True,
         )
+
+
+def _merge_zero_bends(straights, bends, tol: float = 1e-9):
+    """Supprime les coudes d'angle nul en recollant leurs segments voisins.
+
+    Retourne (straights, bends, longueurs des segments recolles).
+    """
+    out_s = list(straights)
+    out_b = list(bends)
+    merged: list[float] = []
+    i = 0
+    while i < len(out_b):
+        if abs(out_b[i].angle) <= tol and i + 1 < len(out_s):
+            out_s[i] = out_s[i] + out_s[i + 1]
+            merged.append(out_s[i])
+            del out_s[i + 1]
+            del out_b[i]
+            continue
+        i += 1
+    return out_s, out_b, merged
 
 
 REGISTRY = {BSAConvention.name: BSAConvention()}

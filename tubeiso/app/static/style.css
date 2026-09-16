@@ -304,3 +304,27 @@ table.lft td.col { font-family: var(--mono); color: var(--fg-dim);
 table.lft tr.conflict td { background: rgba(242, 169, 59, .09); }
 .warnmark { display: block; color: var(--warn); font-size: 10.5px;
             font-style: normal; margin-top: 2px; }
+
+
+/* --- nature de la matiere et perimetre ------------------------------------
+   Une piece hors perimetre ne doit jamais etre confondue avec une piece
+   conforme : elle s'efface, et sa pastille prend une couleur qui n'appartient
+   a aucun niveau de controle. */
+#list li.out { opacity: .62; }
+#list li .nat {
+  font-size: 10px; line-height: 1; letter-spacing: .04em; text-transform: uppercase;
+  padding: 2px 5px; border-radius: 3px; border: 1px solid transparent; flex: none;
+}
+#list li .nat.rigide { color: #1f6b43; background: #e9f3ed; border-color: #cfe3d8; }
+#list li .nat.souple { color: #95610b; background: #fbf2e0; border-color: #ecdcb8; }
+#list li .nat.unk    { color: #6b7280; background: #eef0f2; border-color: #dde1e6; }
+.dot.out { background: #9aa3ab; }
+.kv .nat {
+  font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 3px;
+}
+.kv .nat.rigide { color: #1f6b43; background: #e9f3ed; }
+.kv .nat.souple { color: #95610b; background: #fbf2e0; }
+.kv .nat.unk    { color: #6b7280; background: #eef0f2; }
+.kv b.bad  { color: #b3261e; }
+.kv b.good { color: #1f6b43; }

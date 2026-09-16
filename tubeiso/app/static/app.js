@@ -469,6 +469,7 @@ function renderDims(d) {
     }
   });
 
+  const m = d.matiere || {};
   const spring = d.bends.reduce((a, b) => a + (b.springback || 0), 0);
   const modes = { entier: 'arrondi entier', proportionnel: 'proportionnel',
                   brut: 'aucune (R15 brut)' };
@@ -481,9 +482,22 @@ function renderDims(d) {
       <dt title="Numéro de LFT, c'est-à-dire le lot">Liste / lot</dt>
         <dd>${esc(d.liste) || '—'}</dd>
       <dt>Diamètre</dt><dd>Ø${d.diameter}${d.wall ? ` × ${d.wall}` : ''}</dd>
-      <dt>Matière</dt><dd>${esc(d.material) || '—'}</dd>
       <dt>Outillage</dt><dd>${esc(d.tooling) || '—'} · ${esc(d.head)}</dd>
       <dt>Rayon Rm</dt><dd>${d.bend_radius ?? '—'} mm</dd>
+    </dl>
+
+    <h3 class="sec">Matière</h3>
+    <dl class="kv">
+      <dt>Nature</dt><dd><span class="nat ${m.nature === 'souple' ? 'souple'
+          : m.nature === 'rigide' ? 'rigide' : 'unk'}">${esc(m.nature || 'inconnue')}</span>
+        ${m.cintrable ? ' · cintrable Crippa' : ' · non cintrable'}</dd>
+      <dt>Désignation</dt><dd>${esc(m.matiere || d.material || '—')}</dd>
+      <dt>Code BSA</dt><dd>${esc(m.code_matiere) || '—'}</dd>
+      <dt>Famille</dt><dd>${esc(m.famille) || '—'}</dd>
+      <dt>Épaisseur paroi</dt><dd>${m.paroi != null ? m.paroi + ' mm' : '—'}</dd>
+      <dt>Périmètre</dt><dd>${m.statut === 'exclue'
+          ? `<b class="bad">exclue</b> — ${esc(m.motif)} : ${esc(m.detail)}`
+          : '<b class="good">traitée</b> — plan et 3D générés'}</dd>
     </dl>
 
     <h3 class="sec">Cotations du tube fini</h3>
@@ -610,14 +624,25 @@ function renderList() {
     html.push(`<section class="lot">
       <header class="lot-head"><span class="lot-no">${esc(lot.label)}</span>
         <span class="chip">${items.length}</span></header>
-      <ul>${items.map((t) => `
-        <li data-uid="${t.uid}" class="${t.uid === S.uid ? 'on' : ''}">
-          <i class="dot ${t.status === 'erreur' ? 'err'
-                        : t.status === 'alerte' ? 'warn' : 'info'}"></i>
+      <ul>${items.map((t) => {
+        const out = t.scope === 'exclue';
+        // Une pièce hors périmètre ne produit ni plan ni 3D : elle reste
+        // visible, mais son motif doit se lire sans clic.
+        const dot = out ? 'out'
+                  : t.status === 'erreur' ? 'err'
+                  : t.status === 'alerte' ? 'warn' : 'info';
+        const meta = out ? esc(t.reason || 'hors périmètre')
+                         : `Ø${t.diameter} · ${t.bends}c${t.rows > 1 ? ` · ${t.rows}L` : ''}`;
+        return `
+        <li data-uid="${t.uid}" class="${t.uid === S.uid ? 'on' : ''}${out ? ' out' : ''}"
+            title="${esc(t.matiere || '')}${t.reason_label ? ' — ' + esc(t.reason_label) : ''}">
+          <i class="dot ${dot}"></i>
           <span class="ref">${esc(t.ref)}</span>
-          <span class="meta">${t.straight ? 'droit' : `Ø${t.diameter} · ${t.bends}c`}${
-            t.rows > 1 ? ` · ${t.rows}L` : ''}</span>
-        </li>`).join('')}</ul>
+          <span class="nat ${t.nature === 'souple' ? 'souple' : t.nature === 'rigide' ? 'rigide' : 'unk'}"
+                >${t.nature === 'souple' ? 'souple' : t.nature === 'rigide' ? 'rigide' : '?'}</span>
+          <span class="meta">${meta}</span>
+        </li>`;
+      }).join('')}</ul>
     </section>`);
   }
 
@@ -669,9 +694,11 @@ function applyLoaded(data) {
   S.uid = null;
   renderList();
   const all = S.lots.flatMap((l) => l.tubes);
-  const ok = all.filter((t) => t.status !== 'erreur').length;
+  const inScope = all.filter((t) => t.scope !== 'exclue');
+  const ok = inScope.filter((t) => t.status !== 'erreur').length;
   const lots = S.lots.length;
-  say(`${data.count} pièce(s) dans ${lots} lot(s) — ${ok} exploitable(s), `
+  say(`${data.count} pièce(s) dans ${lots} lot(s) — ${inScope.length} dans le périmètre `
+      + `PROGCRIPPA, ${all.length - inScope.length} exclue(s) — ${ok} exploitable(s), `
       + `${all.length - ok} à corriger.`);
   (data.warnings || []).forEach((w) => console.warn('LFT :', w));
   if (all.length) select(all[0].uid);

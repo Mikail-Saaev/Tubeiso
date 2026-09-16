@@ -61,9 +61,18 @@ hiddenimports = extra_hidden + [
     "cadquery", "cadquery.occ_impl.shapes", "cadquery.occ_impl.exporters",
     "cadquery.occ_impl.exporters.assembly", "cadquery.occ_impl.assembly",
     "ezdxf", "openpyxl", "numpy", "flask", "jinja2", "werkzeug",
+    "reportlab", "reportlab.pdfgen", "reportlab.pdfgen.canvas",
+    "reportlab.pdfbase", "reportlab.pdfbase.pdfmetrics", "reportlab.lib.colors",
     "tubeiso", "tubeiso.app", "tubeiso.app.server", "tubeiso.app.launcher",
-    "tubeiso.parsers", "tubeiso.parsers.crippa",
+    "tubeiso.batch", "tubeiso.materials", "tubeiso.registry", "tubeiso.scope",
+    "tubeiso.sheet", "tubeiso.parsers", "tubeiso.parsers.crippa",
 ]
+
+# reportlab embarque ses metriques de polices et ses ressources dans le paquet.
+try:
+    datas += collect_data_files("reportlab")
+except Exception:
+    pass
 
 # cadquery tire par defaut un rendu VTK, un compilateur JIT et un solveur
 # d'optimisation dont l'application ne se sert jamais : elle n'utilise que le

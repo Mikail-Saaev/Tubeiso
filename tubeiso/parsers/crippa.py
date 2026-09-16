@@ -19,6 +19,8 @@ RE_HEADER = re.compile(r"^%\s*MPF\s*(\S+)", re.I)
 RE_COMMENT = re.compile(r"\((.*)\)\s*$")
 # Appel d'outillage : tolere un commentaire a la suite, comme « L56 (tete du bas) ».
 RE_SUBCALL = re.compile(r"^L(\d+)\s*(?:\(.*)?$", re.I)
+# Ligne d'initialisation : L1 ou L4, suivie des parametres R. [DOC 3.1 / 4.2]
+RE_INIT = re.compile(r"^L([14])\b(?=.*\bR\d+\s*=)", re.I)
 RE_BLOCK = re.compile(r"^N(\d+)\s+L(\d+)\b(.*)$", re.I)
 RE_RPARAM = re.compile(r"\bR(\d+)\s*=\s*(-?\d+(?:\.\d+)?)")
 RE_AXIS = re.compile(r"\b([YBCXZ])\s*(-?\d+(?:\.\d+)?)")
@@ -151,8 +153,8 @@ def parse(text: str, ref: str = "") -> RawProgram:
         m = RE_SUBCALL.match(line)
         if m:
             n = int(m.group(1))
-            if n in (1, 4):                 # L1 / L4 = cycles de chargement
-                prog.loading = f"L{n}"
+            if n in (1, 4):                 # L1 / L4 nus = cycles de chargement
+                prog.loading = prog.loading or f"L{n}"
                 continue
             if n <= 3:                      # L2 / L3 sans bloc N : ignore
                 continue
@@ -183,7 +185,12 @@ def parse(text: str, ref: str = "") -> RawProgram:
             prog.blocks.append(current)
             continue
 
-        if line.upper().startswith("L1 ") or line.upper() == "L1":
+        m = RE_INIT.match(line)
+        if m:
+            # [DOC 3.1] L1 = chargement automatique, L4 = chargement des tubes
+            # > 1500 et petit diametre. Les deux portent R6 et R12 : ne lire
+            # que L1 perdait le premier segment de tous les tubes longs.
+            prog.loading = f"L{m.group(1)}"
             prog.init = _rparams(line)
             continue
 

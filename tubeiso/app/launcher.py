@@ -73,6 +73,15 @@ def open_window(url: str, mode: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # L'executable empaquete est le seul point d'entree distribue : il doit
+    # donc aussi donner acces a la ligne de commande, sinon le traitement par
+    # lot resterait reserve aux postes ou Python est installe.
+    #     tubeiso.exe --cli batch D:\LFT -o D:\bibliotheque
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list and argv_list[0] in ("--cli", "cli"):
+        from ..cli import main as cli_main
+        return cli_main(argv_list[1:])
+
     p = argparse.ArgumentParser(
         prog="tubeiso-app", description="Interface graphique tubeiso")
     p.add_argument("source", nargs="?", help="fichier LFT .xlsx a ouvrir au demarrage")
@@ -81,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=("auto", "window", "browser", "none"),
                    default="auto")
     p.add_argument("--debug", action="store_true")
-    args = p.parse_args(argv)
+    args = p.parse_args(argv_list)
 
     from .server import Session, create_app
 

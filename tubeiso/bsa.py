@@ -41,10 +41,15 @@ R33_LOAD_Z = {4: 280, 6: 280, 8: 279.5, 10: 279.5, 12: 279,
               15: 279, 16: 278.5, 18: 278.5, 22: 278}
 
 # [DOC 5.4] R15 a programmer pour obtenir un pli reel a 90 degres.
-R15_FOR_90 = {4: 93, 6: 92, 8: 92, 10: 92, 12: 92.5, 15: 92.5, 18: 93}
+# Le O16 ne figure pas dans la table : il partage la matrice du O15 (Rm=45),
+# donc sa compensation. Sans cette ligne, un O16 sortait sans aucune
+# correction d'elasticite, soit 2.5 deg de trop sur chaque coude.
+R15_FOR_90 = {4: 93, 6: 92, 8: 92, 10: 92, 12: 92.5, 15: 92.5, 16: 92.5,
+              18: 93}
 
 # [DOC 5.5 / XLSM] Segment droit intermediaire minimum = largeur des mors.
-MIN_STRAIGHT = {4: 7, 6: 11, 8: 15, 10: 20, 12: 24, 15: 30, 16: 30, 18: 36}
+# [XLSM Feuil2!B47] donne 36 mm pour le O16, et non 30 comme le O15.
+MIN_STRAIGHT = {4: 7, 6: 11, 8: 15, 10: 20, 12: 24, 15: 30, 16: 36, 18: 36}
 
 # [DOC 5.1 / XLSM Feuil2!B11] Somme minimale des 2 derniers segments (reglette).
 MIN_LAST_TWO = {4: 90, 6: 90, 8: 120, 10: 120, 12: 170, 15: 170, 16: 170, 18: 170}
@@ -68,10 +73,40 @@ X_MIN_UPPER = {4: 67, 6: 67, 8: 67, 10: 55}
 
 # [DOC 4.2] Codes d'embout de la LFT.
 END_FITTINGS = {
-    "V04": "Sertissage Vogel Ø4", "V06": "Sertissage Vogel Ø6",
-    "V08": "Sertissage Vogel Ø8", "V10": "Sertissage Vogel Ø10",
-    "PE": "Pincage perpendiculaire Ø6", "PA": "Pincage parallele Ø6",
+    "V04": "Sertissage Vögel Ø4", "V06": "Sertissage Vögel Ø6",
+    "V08": "Sertissage Vögel Ø8", "V10": "Sertissage Vögel Ø10",
+    "PE": "Pinçage perpendiculaire Ø6", "PA": "Pinçage parallèle Ø6",
 }
+
+# [DOC 8.1.2] Forages Vogel (SKF), DIN 3854 / DIN 3862, tubes sans soudure.
+# diametre exterieur -> (designation du forage, T1 profondeur mm, D3 mm, filetage)
+# T1 est la profondeur d'emmanchement du tube : elle conditionne la longueur
+# utile du premier et du dernier segment. « Ces profondeurs sont a controler
+# sur chaque tube dans la maquette 3D pour assurer les longueurs du premier et
+# dernier segment, s'ils sont sertis. »
+VOGEL_DRILL = {
+    2.5: ("1102", 8.5, 1.5, "M6x0,75"),
+    4: ("1404", 12.5, 3.0, "M8x1"),
+    6: ("1406", 14.0, 4.5, "M10x1"),
+    8: ("1408", 18.5, 6.5, "M14x1,5"),
+    10: ("1410", 19.5, 8.5, "M16x1,5"),
+    12: ("1412", 22.0, 10.5, "M18x1,5"),
+}
+
+# [DOC 8.1.2] Profondeur du tube dans un raccord Ermeto EO 24 degres PARKER.
+# diametre exterieur -> (serie L legere, serie S lourde). None = non disponible.
+# La cote T1 est identique a la longueur de l'ecrou.
+ERMETO_INSERT = {
+    6: (14.5, 16.5), 8: (14.5, 16.5), 10: (15.5, 17.5), 12: (15.5, 17.5),
+    15: (17.0, None), 18: (18.0, None), 22: (20.0, None), 28: (21.0, None),
+    35: (24.0, None),
+}
+
+# [DOC 8.3.3] Les cotes relevees dans CATIA sont arrondies au demi-millimetre,
+# et les angles au degre. C'est la tolerance de lecture du modele, a ne pas
+# confondre avec une tolerance de fabrication.
+Y_ROUNDING = 0.5
+ANGLE_ROUNDING = 1.0
 
 # [DOC 4.2] Segmentation du programme en deux moities : premier Y ecrit = 35 max.
 SPLIT_Y = 35.0
@@ -199,22 +234,38 @@ def real_angle(r15: float, diameter: float, mode: str = "entier"
     if mode == "proportionnel":
         return proportional, r15 - proportional
 
-    # mode entier : n'a de sens que si le programmeur a ecrit un entier
-    if abs(r15 - round(r15)) > 1e-9:
-        return proportional, r15 - proportional
-
+    # Mode entier : on cherche l'angle que le programmeur a mesure dans CATIA.
+    # Il travaille au demi-degre [DOC 8.3.3, « arrondir les cotes a 0.5 mm » et
+    # table 5.4 qui donne des R15 de 92.5], donc les candidats vont de demi en
+    # demi. S'en tenir aux entiers laissait sans reponse un coude sur dix du
+    # parc — R15=92.5 en O8, 25.5 en O6, 46 en O4 — qui basculaient alors sur
+    # une division produisant des angles comme 90.489 deg.
+    step = 0.5
     candidates = []
-    for delta in range(SPRINGBACK_MAX + 1):
-        theta = round(r15) - delta
+    n = int(SPRINGBACK_MAX / step) + 1
+    for k in range(n + 1):
+        theta = r15 - k * step
         if theta <= 0:
             break
-        if _round_half_up(rate * theta) == delta:
-            candidates.append((abs(theta - proportional), float(theta), float(delta)))
+        delta = r15 - theta
+        # Le supplement est arrondi « a la main » : la doc dit « divise par deux
+        # ENV. l'angle additionnel », et l'annotation du 412 montre 1 deg la ou
+        # le calcul donne 1.02. On accepte donc l'arrondi par defaut comme par
+        # exces, et on tranche ensuite par la proximite a la valeur exacte.
+        raw = rate * theta
+        if math.floor(raw) - 1e-9 <= delta <= math.ceil(raw) + 1e-9:
+            # Un angle entier l'emporte toujours sur un demi-degre : le
+            # demi-degre n'est retenu que lorsque AUCUN entier ne reproduit le
+            # R15 ecrit, comme R15=92.5 en O8. A egalite, on garde le
+            # supplement le plus fort, puisque le programmeur en applique un.
+            is_half = abs(theta - round(theta)) > 1e-9
+            candidates.append((is_half, round(abs(theta - proportional), 6),
+                               -delta, float(theta), float(delta)))
     if not candidates:
-        # aucun entier ne reproduit ce R15 : on ne force rien, on divise
+        # aucun angle ne reproduit ce R15 : on ne force rien, on divise
         return proportional, r15 - proportional
     candidates.sort()
-    return candidates[0][1], candidates[0][2]
+    return candidates[0][3], candidates[0][4]
 
 
 def true_angle(r15: float, diameter: float, mode: str = "entier") -> float:

@@ -50,7 +50,8 @@ def check(tube: TubeProgram, tooling: Tooling,
     d = int(tube.diameter) if tube.diameter else 0
 
     for w in tube.warnings:
-        if "retour elastique" in w or "reconstitue depuis" in w:
+        if ("retour elastique" in w or "reconstitue depuis" in w
+                or "faux pli" in w):
             lvl = INFO
         elif "negatif" in w or "incomplet" in w:
             lvl = ERROR
@@ -120,9 +121,17 @@ def check(tube: TubeProgram, tooling: Tooling,
                              f"{last + recut:.1f} mm < {mini_last} mm",
                              "XLSM Feuil2!B30"))
         if last > bsa.MAX_LAST:
-            out.append(Issue(WARN, "dernier_segment_long",
-                             f"{last:.1f} mm > {bsa.MAX_LAST:.0f} mm : "
-                             "prevoir un faux pli a 0°", "DOC 5.3"))
+            # Le faux pli a 0 degre est la parade prevue par la doc. S'il est
+            # deja dans le programme, la regle est respectee : le signaler
+            # serait reprocher au programmeur d'avoir bien fait.
+            if tube.false_bends:
+                out.append(Issue(INFO, "faux_pli_present",
+                                 f"dernier segment de {last:.0f} mm, faux pli à 0° "
+                                 "présent dans le programme", "DOC 5.3"))
+            else:
+                out.append(Issue(WARN, "dernier_segment_long",
+                                 f"{last:.1f} mm > {bsa.MAX_LAST:.0f} mm : "
+                                 "prévoir un faux pli à 0°", "DOC 5.3"))
 
     # --- angles : on controle le PROGRAMME (R15), pas l'angle reel, car c'est
     # R15 que la machine execute et que borne la course de l'axe C.
@@ -140,12 +149,17 @@ def check(tube: TubeProgram, tooling: Tooling,
                              "de tete obligatoire", "DOC 5.7"))
 
     # --- R7=0 avant l'avant-dernier pli
-    if tube.params.get("R7") == 2 and len(tube.bends) >= 2:
+    # [XLSM Feuil2!B11-B15] =IF(dernier segment + recoupe < longueur reglette,
+    # "METTRE R7=0"). Ne pas confondre avec la regle de recoupe [DOC 5.1], qui
+    # porte sur la SOMME des deux derniers segments.
+    if len(tube.bends) >= 2 and not tube.r7_released:
         seuil = bsa.MIN_LAST_TWO.get(d)
-        if seuil and (tube.straights[-1] + tube.straights[-2]) < seuil:
+        if seuil and (tube.straights[-1] + recut) < seuil:
             out.append(Issue(WARN, "r7_manquant",
+                             f"dernier segment + recoupe = "
+                             f"{tube.straights[-1] + recut:.1f} mm < {seuil} mm : "
                              "inserer R7=0 apres l'avant-dernier pli",
-                             "DOC 4.2"))
+                             "XLSM Feuil2!B15"))
 
     # --- collision de la piece sur elle-meme
     if centerline is not None and tube.diameter:

@@ -368,21 +368,28 @@ et écrit :
 
 ```
 bibliotheque/
-  INDEX.xlsx                       une ligne par tube, filtrable, avec les liens
-  rapport.csv                      le même contenu en texte
-  journal.txt                      ce qui s'est passé, fichier par fichier
-  BSH/PLATINE_82_0889/BCH_PLATINE_82_0889_0877-0000-CL/
-      …_cahier.pdf                 tous les plans du lot
-      …_recapitulatif.csv          les pièces du lot
-      plans/223.pdf                le plan autoportant
-      modeles_3d/223.stp           le solide
-      donnees/223.json             toutes les données techniques
+  INDEX.xlsx        une ligne par tube, filtrable, avec les liens
+  rapport.csv       le même contenu en texte
+  journal.txt       ce qui s'est passé, fichier par fichier
+  plans/            BCH_PLATINE_82_0889_0877-0000-CL_223.pdf
+  step/             BCH_PLATINE_82_0889_0877-0000-CL_223.stp
+  donnees/          BCH_PLATINE_82_0889_0877-0000-CL_223.json
+  cahiers/          BCH_PLATINE_82_0889_0877-0000-CL_cahier.pdf
+  stl/ brep/ dxf/   seulement si ces formats sont demandés
 ```
 
-Le rattachement **Groupe → Machine → LFT** vient de
+**Un dossier par type, et rien d'imbriqué.** Une arborescence
+`groupe/machine/LFT/plans/` obligeait à descendre quatre niveaux pour ouvrir un
+plan, et à remonter autant pour passer au suivant. Le nom du fichier porte déjà
+sa LFT et son repère : la traçabilité ne gagne rien à être répétée en dossiers.
+Le rattachement groupe / machine reste disponible, en colonne filtrable, dans
+`INDEX.xlsx`. L'export manuel suit la même règle, avec une case à décocher si
+l'on préfère tout à plat dans un seul dossier.
+
+Le rattachement **groupe / machine** vient de
 `Repertoire_Machines_Consolide.xlsm`, qui associe chaque code LFT — c'est-à-dire
-chaque nom de fichier — à sa machine et à sa description. Sans ce fichier, le
-nom se suffit : `BCH_PLATINE_82_0889_0877-0000-CL` donne le groupe BSH (le
+chaque nom de fichier — à sa machine et à sa description, et alimente les
+colonnes de l'index. Sans ce fichier, le nom se suffit : `BCH_PLATINE_82_0889_0877-0000-CL` donne le groupe BSH (le
 préfixe de fichier `BCH` désigne le groupe `BSH`), la machine `PLATINE_82_0889`
 et la liste `0877-0000-CL`.
 
@@ -398,8 +405,10 @@ sort en deux clics toutes les pièces d'un groupe à revoir.
 
 Trois propriétés comptent à cette échelle :
 
-* **reprenable.** Une LFT déjà traitée est sautée, sauf `--force`. Une campagne
-  interrompue redémarre où elle s'était arrêtée.
+* **reprenable.** L'état vit dans `.tubeiso-etat.json`, à la racine de la
+  sortie : une LFT déjà traitée est sautée, sauf `--force`. L'état est écrit
+  tous les vingt-cinq fichiers, donc une coupure ne coûte jamais plus que
+  quelques minutes de calcul.
 * **tolérante.** Un classeur illisible est journalisé et la campagne continue.
 * **parallèle.** `--workers 6` répartit les fichiers sur plusieurs processus.
   `--no-3d` saute les solides et va cinq fois plus vite, pour un premier

@@ -239,19 +239,19 @@ class Session:
             return
 
         if not p.verdict.ok:
-            # Hors perimetre : on ne fabrique AUCUNE geometrie. Un modele
-            # invente pour un tuyau souple serait pris pour argent comptant.
-            tooling = self.config.for_program("", diameter, rec.get("CODE_MAT"))
+            # Hors perimetre : AUCUNE geometrie n'est fabriquee, pas meme pour
+            # l'affichage. La version precedente construisait un tube droit
+            # « pour avoir quelque chose a montrer » — et un tuyau souple de
+            # 5 m s'affichait en 3D avec un developpe, ce qu'un operateur
+            # pouvait prendre pour une piece reelle.
             p.raw = raw
-            p.tooling = tooling
+            p.tooling = self.config.for_program("", diameter,
+                                                rec.get("CODE_MAT"))
             p.recut = rec.recut
-            p.tube = conv.build_straight(p.ref, lft_length or 0.0,
-                                         diameter or 0.0, tooling)
-            p.tube.list_number = rec.list_number
-            p.tube.program_number = rec.program_number
+            p.tube = None
             p.issues = [validate.Issue(
                 validate.WARN, "hors_perimetre",
-                f"{p.verdict.reason} — {p.verdict.detail}", "perimetre")]
+                f"{p.verdict.reason} — {p.verdict.detail}", "périmètre")]
             return
 
         raw.name = raw.name or p.ref
@@ -292,6 +292,7 @@ class Session:
                 if p.lot != lot.number:
                     continue
                 t, raw = p.tube, p.raw
+                hors = t is None
                 mat = p.verdict.material if p.verdict else None
                 items.append({
                     "uid": p.uid,
@@ -305,14 +306,14 @@ class Session:
                     "nature": p.verdict.kind if p.verdict else "inconnue",
                     "matiere": mat.designation if mat else None,
                     "code_mat": mat.code if mat else None,
-                    "diameter": t.diameter,
+                    "diameter": (p.verdict.diameter if hors else t.diameter) or 0,
                     "tooling": raw.tooling if raw else "",
                     "head": bsa.HEAD_NAMES.get(raw.head if raw else None, "—"),
-                    "declared": t.declared_length,
-                    "bends": t.n_bends,
+                    "declared": None if hors else t.declared_length,
+                    "bends": 0 if hors else t.n_bends,
                     "recut": p.recut,
-                    "complete": t.complete,
-                    "straight": t.straight,
+                    "complete": True if hors else t.complete,
+                    "straight": bool(p.verdict and p.verdict.straight),
                     "rows": len(p.record.rows),
                     "status": "exclue" if not p.in_scope else validate.worst(p.issues),
                 })
@@ -343,6 +344,8 @@ class Session:
         return data
 
     def _detail(self, p: Piece, deflection: float) -> dict:
+        if not p.in_scope or p.tube is None:
+            return self._detail_out_of_scope(p)
         tube, tooling = p.tube, p.tooling
         cl = geometry.build(tube, handedness=self.config.handedness)
 
@@ -414,6 +417,35 @@ class Session:
             },
         }
 
+    def _detail_out_of_scope(self, p: Piece) -> dict:
+        """Ce qu'on affiche d'une piece ecartee : son identite, sa matiere et
+        le motif. Pas de geometrie, pas de developpe, pas de maillage."""
+        v = p.verdict
+        return {
+            "uid": p.uid, "ref": p.ref, "lot": p.lot,
+            "programme": p.record.program_number,
+            "liste": p.record.list_number,
+            "out_of_scope": True,
+            "scope": v.status if v else "exclue",
+            "reason": v.reason if v else "",
+            "reason_label": v.detail if v else "",
+            "matiere": v.as_dict() if v else None,
+            "diameter": (v.diameter if v else None) or 0,
+            "wall": v.material.wall if v and v.material else None,
+            "material": v.material.designation if v and v.material else None,
+            "source": p.record.iso or "",
+            "comment": "",
+            "declared": p.record.number("LONGUEUR"),
+            "straights": [], "bends": [], "primitives": [],
+            "polyline": [], "vertices": [], "tangents": [],
+            "mesh": None, "mesh_error": None,
+            "issues": [{"level": i.level, "code": i.code, "message": i.message,
+                        "source": i.source} for i in p.issues],
+            "status": "exclue",
+            "fields": self.fields(p),
+            "simulation": None,
+        }
+
     def fields(self, p: Piece) -> list[dict]:
         """Toutes les colonnes de la LFT pour cette piece, sans exception.
 
@@ -458,9 +490,22 @@ class Session:
         )
 
     # ---------------------------------------------------------------- exports
-    def export(self, uids: list[str], out_dir: str, formats: list[str]) -> dict:
+    def export(self, uids: list[str], out_dir: str, formats: list[str],
+               by_type: bool = True) -> dict:
+        """Ecrit les fichiers demandes. `by_type` range chaque format dans son
+        propre dossier — plans/, step/, donnees/… — comme le fait une campagne."""
         out = Path(out_dir).expanduser()
-        out.mkdir(parents=True, exist_ok=True)
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"dossier de destination inutilisable : {out} ({exc.strerror})"
+            ) from exc
+
+        def dest(kind: str) -> Path:
+            d = out / batch.folder_for(kind) if by_type else out
+            d.mkdir(parents=True, exist_ok=True)
+            return d
         done, failed = [], []
         for uid in uids:
             p = self.pieces.get(uid)
@@ -478,23 +523,32 @@ class Session:
             name = registry.output_basename(
                 Path(self.source).stem if self.source else "", p.ref)
             try:
+                if p.tube is None:                               # pragma: no cover
+                    raise ValueError("aucune géométrie pour cette pièce")
                 cl = geometry.build(p.tube, handedness=self.config.handedness)
-                cad = [f for f in formats if f in ("step", "stl", "brep")]
-                if cad:
-                    for f in solid.export(p.tube, cl, out, p.tooling, cad,
-                                          basename=name):
+                for fmt in [f for f in formats if f in ("step", "stl", "brep")]:
+                    for f in solid.export(p.tube, cl, dest(fmt), p.tooling,
+                                          [fmt], basename=name):
                         done.append(str(f))
                 if "pdf" in formats or "svg" in formats:
                     data = self.plan_data(p, cl)
                     if "pdf" in formats:
-                        done.append(str(render.to_pdf(data, out / f"{name}.pdf")))
+                        done.append(str(render.to_pdf(
+                            data, dest("pdf") / f"{name}.pdf")))
                     if "svg" in formats:
-                        q = out / f"{name}.svg"
+                        q = dest("svg") / f"{name}.svg"
                         q.write_text(render.to_svg(data), encoding="utf-8")
                         done.append(str(q))
                 if "dxf" in formats:
-                    render.to_dxf(p.tube, cl, str(out / f"{name}.dxf"))
-                    done.append(str(out / f"{name}.dxf"))
+                    q = dest("dxf") / f"{name}.dxf"
+                    render.to_dxf(p.tube, cl, str(q))
+                    done.append(str(q))
+                if "json" in formats:
+                    q = dest("json") / f"{name}.json"
+                    q.write_text(json.dumps(self._detail(p, 0.2), ensure_ascii=False,
+                                            indent=2, default=str),
+                                 encoding="utf-8")
+                    done.append(str(q))
             except Exception as exc:
                 # Le motif est ce qui compte : « 95 echecs » sans raison ne
                 # permet pas de corriger quoi que ce soit.
@@ -670,7 +724,8 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
         try:
             return jsonify(s.export(data.get("uids") or list(s.pieces),
                                     data.get("dir") or ".",
-                                    data.get("formats") or ["step"]))
+                                    data.get("formats") or ["step"],
+                                    by_type=bool(data.get("by_type", True))))
         except Exception as exc:
             return api_error(exc)
 

@@ -26,9 +26,10 @@ CODE_MAT_DIAMETER = {
 
 
 def code_mat_diameter(code: object) -> int | None:
-    """'293-421-006' ou '293 421 006' -> 6."""
-    digits = "".join(c for c in str(code or "") if c.isdigit())
-    return CODE_MAT_DIAMETER.get(digits)
+    """'293-421-006' ou '293 421 006' -> 6. Delegue a `materials`, qui sait
+    aussi rattraper un code rendu sous forme de nombre par openpyxl."""
+    from . import materials
+    return CODE_MAT_DIAMETER.get(materials.digits(code))
 
 
 def _default_tooling() -> dict:

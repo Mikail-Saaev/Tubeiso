@@ -2,18 +2,22 @@
 
 Une campagne lit un ou plusieurs dossiers de fichiers LFT et produit, pour
 chaque tube retenu, son plan PDF, son modele 3D et ses donnees techniques,
-ranges dans une arborescence ou tout se retrouve a coup sur :
+ranges **a plat, un dossier par type de fichier** :
 
     <sortie>/
-      INDEX.xlsx                      une ligne par tube, toutes LFT confondues
-      rapport.csv                     le meme contenu, en texte
-      journal.txt                     ce qui s'est passe, fichier par fichier
-      <GROUPE>/<MACHINE>/<LFT>/
-          <LFT>_cahier.pdf            tous les plans du lot, avec sa couverture
-          <LFT>_recapitulatif.csv     les pieces du lot
-          plans/<REPERE>.pdf          le plan autoportant du tube
-          modeles_3d/<REPERE>.stp     le solide, pour la sous-traitance
-          donnees/<REPERE>.json       toutes les donnees techniques
+      INDEX.xlsx        une ligne par tube, avec ses chemins et son etat
+      rapport.csv       le meme contenu, en texte
+      journal.txt       ce qui s'est passe, fichier par fichier
+      plans/            <LFT>_<REPERE>.pdf     le plan autoportant
+      step/             <LFT>_<REPERE>.stp     le solide, pour la sous-traitance
+      donnees/          <LFT>_<REPERE>.json    toutes les donnees techniques
+      cahiers/          <LFT>_cahier.pdf       tous les plans d'un lot
+      stl/ brep/ dxf/   seulement si ces formats sont demandes
+
+Il n'y a pas de dossiers imbriques par groupe et par machine : le nom du
+fichier porte deja sa LFT et son repere, donc la tracabilite est assuree sans
+qu'on ait a descendre trois niveaux. Le rattachement groupe / machine reste
+disponible, en colonne filtrable, dans `INDEX.xlsx`.
 
 Deux principes de fonctionnement :
 
@@ -41,6 +45,19 @@ from .parsers import crippa
 
 EXTENSIONS = (".xlsx", ".xlsm")
 SKIP_PREFIX = ("~$", ".")
+
+# Un dossier par type de fichier, a plat sous la racine de sortie.
+FOLDERS = {
+    "pdf": "plans", "step": "step", "stp": "step", "stl": "stl",
+    "brep": "brep", "dxf": "dxf", "json": "donnees", "cahier": "cahiers",
+    "svg": "apercus",
+}
+STATE_FILE = ".tubeiso-etat.json"
+
+
+def folder_for(kind: str) -> str:
+    """Dossier de destination d'un type de fichier."""
+    return FOLDERS.get(str(kind).lower().lstrip("."), "autres")
 
 
 # --------------------------------------------------------------------- options
@@ -284,7 +301,8 @@ def _tube_json(data: render.PlanData, verdict: scope.Verdict,
 
 
 def process_file(source, out_root, options: Options,
-                 entry: registry.Entry | None = None) -> LftResult:
+                 entry: registry.Entry | None = None,
+                 state: dict | None = None) -> LftResult:
     """Traite une LFT complete. Ne leve pas : tout incident est capture."""
     source = Path(source)
     out_root = Path(out_root)
@@ -293,10 +311,7 @@ def process_file(source, out_root, options: Options,
     result = LftResult(source=str(source), lft=lft_code,
                        groupe=entry.groupe, machine=entry.machine)
 
-    lot_dir = (out_root / registry.safe_name(entry.groupe)
-               / registry.safe_name(entry.machine) / registry.safe_name(lft_code))
-    marker = lot_dir / ".tubeiso-ok"
-    if marker.exists() and not options.force:
+    if state is not None and not options.force and lft_code in state:
         result.skipped = True
         return result
 
@@ -308,8 +323,9 @@ def process_file(source, out_root, options: Options,
         return result
 
     conv = conventions.get(cfg.convention)
-    plans_dir, models_dir, data_dir = (lot_dir / "plans", lot_dir / "modeles_3d",
-                                       lot_dir / "donnees")
+    plans_dir = out_root / folder_for("pdf")
+    models_dir = out_root / folder_for("step")
+    data_dir = out_root / folder_for("json")
     made: list[render.PlanData] = []
     excluded: list[dict] = []
 
@@ -385,23 +401,23 @@ def process_file(source, out_root, options: Options,
                     row.incident = f"plan : {type(exc).__name__}: {exc}"
 
             if options.models:
-                try:
-                    written = solid.export(
-                        data.tube, data.centerline, models_dir,
-                        tooling=data.tooling, formats=options.formats,
-                        basename=base)
-                    for p in written:
-                        rel = _relative(p, out_root)
-                        paths.setdefault(p.suffix.lstrip("."), rel)
-                        if p.suffix.lower() in (".stp", ".step"):
-                            row.modele_3d = rel
-                except Exception as exc:
-                    row.incident = (row.incident + " · " if row.incident else "") + \
-                        f"3D : {type(exc).__name__}: {exc}"
+                for fmt in options.formats:
+                    target_dir = out_root / folder_for(fmt)
+                    try:
+                        for f in solid.export(data.tube, data.centerline,
+                                              target_dir, tooling=data.tooling,
+                                              formats=[fmt], basename=base):
+                            rel = _relative(f, out_root)
+                            paths.setdefault(f.suffix.lstrip("."), rel)
+                            if f.suffix.lower() in (".stp", ".step"):
+                                row.modele_3d = rel
+                    except Exception as exc:
+                        row.incident = (row.incident + " · " if row.incident else "") \
+                            + f"{fmt.upper()} : {type(exc).__name__}: {exc}"
 
             if options.dxf:
                 try:
-                    dxf_path = models_dir / f"{base}.dxf"
+                    dxf_path = out_root / folder_for("dxf") / f"{base}.dxf"
                     dxf_path.parent.mkdir(parents=True, exist_ok=True)
                     render.to_dxf(data.tube, data.centerline, str(dxf_path))
                     paths["dxf"] = _relative(dxf_path, out_root)
@@ -421,17 +437,16 @@ def process_file(source, out_root, options: Options,
 
     if made and options.booklet:
         try:
-            render.booklet(made, lot_dir / f"{registry.safe_name(lft_code)}_cahier.pdf",
-                           lot_label=lft_code, excluded=excluded)
+            render.booklet(
+                made,
+                out_root / folder_for("cahier")
+                / f"{registry.safe_name(lft_code)}_cahier.pdf",
+                lot_label=lft_code, excluded=excluded)
         except Exception as exc:                                  # pragma: no cover
             result.incident = f"cahier : {type(exc).__name__}: {exc}"
 
-    if result.rows:
-        _write_csv(lot_dir / f"{registry.safe_name(lft_code)}_recapitulatif.csv",
-                   result.rows)
-        lot_dir.mkdir(parents=True, exist_ok=True)
-        marker.write_text(datetime.now().isoformat(timespec="seconds"),
-                          encoding="utf-8")
+    if state is not None and result.rows:
+        state[lft_code] = datetime.now().isoformat(timespec="seconds")
     return result
 
 
@@ -488,6 +503,31 @@ def _write_csv(path: Path, rows: list[TubeRow]) -> None:
             w.writerow(r.__dict__)
 
 
+def load_state(out_root: Path) -> dict:
+    """LFT deja traitees, pour qu'une campagne interrompue reprenne son cours.
+
+    L'ancienne version posait un temoin dans le dossier du lot ; l'arborescence
+    etant desormais plate, l'etat vit dans un seul fichier a la racine.
+    """
+    p = Path(out_root) / STATE_FILE
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("faits", {}) if isinstance(data, dict) else {}
+    except Exception:                                            # pragma: no cover
+        return {}
+
+
+def save_state(out_root: Path, state: dict) -> None:
+    p = Path(out_root) / STATE_FILE
+    try:
+        p.write_text(json.dumps({"faits": state}, ensure_ascii=False, indent=1),
+                     encoding="utf-8")
+    except OSError:                                              # pragma: no cover
+        pass
+
+
 def _worker(payload):                                            # pragma: no cover
     src, out_root, opts, ent = payload
     return process_file(src, out_root, Options.from_dict(opts),
@@ -507,6 +547,7 @@ def run(sources, out_dir, options: Options | None = None, on_file=None,
     out_root.mkdir(parents=True, exist_ok=True)
 
     reg = registry.Registry.load(options.repertoire)
+    state = {} if options.force else load_state(out_root)
     files = discover(sources)
     if options.limit:
         files = files[: options.limit]
@@ -517,15 +558,21 @@ def run(sources, out_dir, options: Options | None = None, on_file=None,
 
     if options.workers and options.workers > 1 and total > 1:    # pragma: no cover
         from concurrent.futures import ProcessPoolExecutor
-        payloads = [
-            (str(f), str(out_root), options.as_dict(),
-             (reg.resolve(f).groupe, reg.resolve(f).machine,
-              reg.resolve(f).description, reg.resolve(f).source))
-            for f in files
-        ]
+        pending = [f for f in files if options.force or f.stem not in state]
+        payloads = []
+        for f in pending:
+            e = reg.resolve(f)                       # une seule resolution
+            payloads.append((str(f), str(out_root), options.as_dict(),
+                             (e.groupe, e.machine, e.description, e.source)))
+        for f in files:
+            if f not in pending:
+                campaign.files.append(
+                    LftResult(source=str(f), lft=f.stem, skipped=True))
         with ProcessPoolExecutor(max_workers=options.workers) as pool:
             for i, res in enumerate(pool.map(_worker, payloads), start=1):
                 campaign.files.append(res)
+                if res.rows:
+                    state[res.lft] = datetime.now().isoformat(timespec="seconds")
                 if on_file:
                     on_file(i, total, res)
                 if cancel and cancel():
@@ -534,12 +581,15 @@ def run(sources, out_dir, options: Options | None = None, on_file=None,
         for i, f in enumerate(files, start=1):
             if cancel and cancel():
                 break
-            res = process_file(f, out_root, options, reg.resolve(f))
+            res = process_file(f, out_root, options, reg.resolve(f), state)
             campaign.files.append(res)
             if on_file:
                 on_file(i, total, res)
+            if i % 25 == 0:
+                save_state(out_root, state)          # une coupure ne perd rien
 
     campaign.finished = datetime.now().isoformat(timespec="seconds")
+    save_state(out_root, state)
     _write_csv(out_root / "rapport.csv", campaign.rows)
     _write_journal(out_root / "journal.txt", campaign, reg)
     try:
@@ -557,6 +607,7 @@ def _write_journal(path: Path, campaign: Campaign, reg: registry.Registry) -> No
         f"début   : {campaign.started}",
         f"fin     : {campaign.finished}",
         f"sortie  : {campaign.out_dir}",
+        "          plans/ · step/ · donnees/ · cahiers/ — un dossier par type",
         f"répertoire machines : {reg.path or 'non fourni (rattachement par nom de fichier)'}",
         "",
         f"fichiers LFT lus      : {s['fichiers']}"
@@ -647,10 +698,8 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
         ws2.column_dimensions[get_column_letter(j)].width = [12, 30, 36, 9, 10, 9, 44, 60, 30][j - 1]
     ws2.freeze_panes = "A2"
     for i, f in enumerate(campaign.files, start=2):
-        cahier = ""
-        if f.treated:
-            cahier = (f"{registry.safe_name(f.groupe)}/{registry.safe_name(f.machine)}/"
-                      f"{registry.safe_name(f.lft)}/{registry.safe_name(f.lft)}_cahier.pdf")
+        cahier = (f"cahiers/{registry.safe_name(f.lft)}_cahier.pdf"
+                  if f.treated else "")
         for j, v in enumerate([f.groupe, f.machine, f.lft, len(f.rows), f.treated,
                                f.excluded, cahier, f.source, f.incident], start=1):
             c = ws2.cell(row=i, column=j, value=v if v != "" else None)

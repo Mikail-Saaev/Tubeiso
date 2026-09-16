@@ -483,7 +483,8 @@ function renderDims(d) {
         <dd>${esc(d.liste) || '—'}</dd>
       <dt>Diamètre</dt><dd>Ø${d.diameter}${d.wall ? ` × ${d.wall}` : ''}</dd>
       <dt>Outillage</dt><dd>${esc(d.tooling) || '—'} · ${esc(d.head)}</dd>
-      <dt>Rayon Rm</dt><dd>${d.bend_radius ?? '—'} mm</dd>
+      ${d.bends.length ? `<dt>Rayon Rm</dt><dd>${d.bend_radius ?? '—'} mm</dd>`
+                       : '<dt>Opération</dt><dd>débit droit, sans cintrage</dd>'}
     </dl>
 
     <h3 class="sec">Matière</h3>
@@ -510,14 +511,14 @@ function renderDims(d) {
       </tbody>
     </table>
 
-    <h3 class="sec">Retour élastique</h3>
+    ${d.bends.length ? `<h3 class="sec">Retour élastique</h3>
     <dl class="kv">
       <dt>Correction</dt><dd>${modes[d.angle_mode] || d.angle_mode}</dd>
       <dt>Total retiré</dt><dd>${spring ? `${fmt(spring, 1)}°` : 'aucun'}</dd>
     </dl>
     <p class="note">Les angles ci-dessus sont ceux du tube <em>après</em>
       pliage. Le programme écrit ${spring ? 'des valeurs plus grandes' : 'les mêmes valeurs'}
-      pour compenser l'élasticité du tube <span class="src">[DOC 5.4]</span>.</p>
+      pour compenser l'élasticité du tube <span class="src">[DOC 5.4]</span>.</p>` : ''}
 
     <h3 class="sec">Contrôle</h3>
     <dl class="kv">
@@ -631,8 +632,10 @@ function renderList() {
         const dot = out ? 'out'
                   : t.status === 'erreur' ? 'err'
                   : t.status === 'alerte' ? 'warn' : 'info';
+        // « 0c » pour un tube droit n'apprend rien : on nomme ce qu'il est.
         const meta = out ? esc(t.reason || 'hors périmètre')
-                         : `Ø${t.diameter} · ${t.bends}c${t.rows > 1 ? ` · ${t.rows}L` : ''}`;
+                  : t.bends ? `Ø${t.diameter} · ${t.bends}c${t.rows > 1 ? ` · ${t.rows}L` : ''}`
+                            : `Ø${t.diameter} · droit`;
         return `
         <li data-uid="${t.uid}" class="${t.uid === S.uid ? 'on' : ''}${out ? ' out' : ''}"
             title="${esc(t.matiere || '')}${t.reason_label ? ' — ' + esc(t.reason_label) : ''}">
@@ -669,6 +672,17 @@ async function select(uid) {
     const d = await api(`/api/tube/${encodeURIComponent(uid)}`);
     S.sim = d.simulation && d.simulation.bends.length ? d.simulation : null;
     stopSim();
+
+    if (d.out_of_scope) {
+      // Aucune géométrie n'existe pour cette pièce, et il ne faut surtout pas
+      // en inventer une : la vue se vide et le panneau explique pourquoi.
+      clearModel();
+      S.detail = null;
+      renderOutOfScope(d);
+      say(`${d.ref} — hors périmètre : ${d.reason_label || d.reason}`, 'err');
+      return;
+    }
+
     showTube(d);
     renderDims(d);
     renderDiag(d);
@@ -685,6 +699,51 @@ async function select(uid) {
   } finally {
     busy(false);
   }
+}
+
+
+/* ───────────────────────────────────── pièces hors périmètre
+
+   Une pièce écartée n'a pas de géométrie. Lui en fabriquer une « pour avoir
+   quelque chose à montrer » est exactement ce qu'il ne faut pas faire : un
+   tuyau souple de 5 m s'affichait en 3D avec un développé, ce qu'on pouvait
+   prendre pour une pièce réelle. */
+function renderOutOfScope(d) {
+  const m = d.matiere || {};
+  $('#hint').style.display = '';
+  $('#hint').innerHTML = `<b>${esc(d.ref)} — hors périmètre</b><br>`
+    + `${esc(d.reason_label || d.reason || '')}<br>`
+    + `<span class="muted">Aucun modèle n'est calculé pour cette pièce.</span>`;
+
+  $('#tab-dims').innerHTML = `
+    <h3 class="sec">Identification</h3>
+    <dl class="kv">
+      <dt>Repère</dt><dd>${esc(d.ref)}</dd>
+      <dt>Programme</dt><dd>${esc(d.programme) || '—'}</dd>
+      <dt>Liste / lot</dt><dd>${esc(d.liste) || '—'}</dd>
+      <dt>Longueur LFT</dt><dd>${d.declared != null ? fmt(d.declared, 0) + ' mm' : '—'}</dd>
+    </dl>
+    <h3 class="sec">Matière</h3>
+    <dl class="kv">
+      <dt>Nature</dt><dd><span class="nat ${m.nature === 'souple' ? 'souple'
+          : m.nature === 'rigide' ? 'rigide' : 'unk'}">${esc(m.nature || 'inconnue')}</span></dd>
+      <dt>Désignation</dt><dd>${esc(m.matiere || '—')}</dd>
+      <dt>Code BSA</dt><dd>${esc(m.code_matiere) || '—'}</dd>
+      <dt>Famille</dt><dd>${esc(m.famille) || '—'}</dd>
+    </dl>
+    <h3 class="sec">Pourquoi cette pièce est écartée</h3>
+    <div class="issue alerte"><div><b>${esc(d.reason || 'hors périmètre')}</b>
+      ${esc(d.reason_label || '')}</div></div>
+    <p class="note">Ni plan ni modèle 3D ne sont produits. La pièce reste
+      listée, ici comme dans <em>INDEX.xlsx</em>, avec ce motif : une campagne
+      rend compte de toutes les lignes lues, y compris celles qu'elle n'a pas
+      traitées.</p>`;
+
+  renderDiag(d);
+  renderLft(d);
+  $('#tab-prog').innerHTML = d.source
+    ? `<pre class="prog">${esc(d.source)}</pre>`
+    : '<p class="empty">Aucune PROGCRIPPA sur cette ligne.</p>';
 }
 
 /* ══════════════════════════════════════════════════════════════════ actions */
@@ -803,7 +862,8 @@ $('#exportAll').onclick = () => { exportScope = 'all'; $('#exportDlg').showModal
 
 $('#doExport').onclick = async (e) => {
   e.preventDefault();
-  const formats = $$('#exportDlg fieldset input:checked').map((i) => i.value);
+  const formats = $$('#exportDlg fieldset input[type=checkbox]:checked')
+    .map((i) => i.value).filter(Boolean);
   const dir = $('#outDir').value.trim() || '.';
   const uids = exportScope === 'all'
     ? S.lots.flatMap((l) => l.tubes.map((t) => t.uid))
@@ -815,7 +875,7 @@ $('#doExport').onclick = async (e) => {
   try {
     const res = await api('/api/export', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uids, dir, formats }),
+      body: JSON.stringify({ uids, dir, formats, by_type: $('#byType').checked }),
     });
     const msg = `${res.written.length} fichier(s) écrit(s) dans ${res.dir}`;
     if (!res.failed.length) { say(msg, 'ok'); return; }

@@ -486,17 +486,21 @@ def test_campagne_range_et_indexe():
         assert s["traitees"] == 1 and s["tubes_droits"] == 1 and s["exclues"] == 1
         assert s["plans"] == 2
 
-        lot = out / "BSH" / "ESSAI_0001" / "BCH_ESSAI_0001_0792-0002-JV"
+        # Arborescence a plat : un dossier par type, pas de niveaux imbriques.
         base = "BCH_ESSAI_0001_0792-0002-JV"
-        assert (lot / "plans" / f"{base}_412.pdf").exists()
-        assert (lot / "plans" / f"{base}_901.pdf").exists(), "le tube droit a un plan"
-        assert (lot / "donnees" / f"{base}_412.json").exists()
-        assert (lot / f"{base}_cahier.pdf").exists()
-        assert not (lot / "plans" / f"{base}_900.pdf").exists(), \
+        assert (out / "plans" / f"{base}_412.pdf").exists()
+        assert (out / "plans" / f"{base}_901.pdf").exists(), "le tube droit a un plan"
+        assert (out / "donnees" / f"{base}_412.json").exists()
+        assert (out / "cahiers" / f"{base}_cahier.pdf").exists()
+        assert not (out / "plans" / f"{base}_900.pdf").exists(), \
             "un tuyau souple ne doit produire aucun plan"
+        dossiers = {d.name for d in out.iterdir() if d.is_dir()}
+        assert dossiers == {"plans", "donnees", "cahiers"}, dossiers
+        assert not any(d.is_dir() for d in (out / "plans").iterdir()), \
+            "aucun sous-dossier sous plans/"
 
         donnees = json.loads(
-            (lot / "donnees" / f"{base}_412.json").read_text("utf-8"))
+            (out / "donnees" / f"{base}_412.json").read_text("utf-8"))
         assert donnees["matiere"]["nature"] == "rigide"
         assert donnees["cintrage"]["lra"][0]["r15_programme"] == 46
         assert len(donnees["geometrie"]["sommets_xyz"]) == tube_sommets(donnees)
@@ -511,8 +515,12 @@ def test_campagne_range_et_indexe():
         assert statuts == {"traitée", "tube droit", "exclue"}
 
         # reprise : la meme campagne relancee ne refait rien
+        assert (out / batch.STATE_FILE).exists(), "l'etat de reprise doit exister"
         again = batch.run([src], out, batch.Options(models=False))
         assert again.summary()["fichiers_sautes"] == 1
+        # ... sauf si on le demande
+        forcee = batch.run([src], out, batch.Options(models=False, force=True))
+        assert forcee.summary()["fichiers_sautes"] == 0
 
 
 def tube_sommets(donnees: dict) -> int:
@@ -641,6 +649,105 @@ def test_nom_de_fichier_tracable():
         "BCH_X_0001-0000-AA_105.1"
     assert registry.output_basename("", "42") == "42"
     assert registry.output_basename("LFT", "a/b:c") == "LFT_a_b_c"
+
+
+# --------------------------------------------- v6.2 : correctifs de l'audit
+
+def test_code_matiere_rendu_comme_un_nombre():
+    """openpyxl rend un code saisi sans tiret comme un nombre, parfois flottant."""
+    from tubeiso import materials
+    from tubeiso.config import code_mat_diameter
+    for valeur in ("293-421-008", "293 421 008", "BSA293421008",
+                   293421008, 293421008.0):
+        assert materials.digits(valeur) == "293421008", valeur
+        assert materials.diameter(valeur) == 8, valeur
+        assert code_mat_diameter(valeur) == 8, valeur
+
+
+def test_recherche_d_azimut_ne_depend_pas_du_nombre_de_points():
+    """Comparer toutes les paires de points coutait une seconde par piece."""
+    import time
+
+    from tubeiso import geometry, render
+    from tubeiso.model import Bend, TubeProgram
+
+    temps = []
+    for n in (5, 40):
+        tube = TubeProgram(ref="T", diameter=6.0, straights=[25.0] * (n + 1),
+                           bends=[Bend(angle=45, rotation=90, clr=11)
+                                  for _ in range(n)])
+        cl = geometry.build(tube)
+        t0 = time.perf_counter()
+        render.best_azimuth(cl, 6.0)
+        geometry.min_segment_distance(cl, 6.0, 11.0)
+        temps.append(time.perf_counter() - t0)
+    assert temps[1] < temps[0] * 4, (
+        f"le coût explose avec le nombre de coudes : {temps}")
+
+
+def test_tube_droit_sans_diametre_est_refuse():
+    """Un plan qui annonce Ø0 n'est pas fabricable : il doit lever une erreur."""
+    from tubeiso import conventions, validate
+    from tubeiso.model import Tooling
+
+    tl = Tooling(name="?", diameter=0.0)
+    tube = conventions.get("bsa").build_straight("X", 500.0, 0.0, tl)
+    codes = {i.code: i.level for i in validate.check(tube, tl)}
+    assert codes.get("diametre_absent") == validate.ERROR
+
+    tl8 = Tooling(name="Ø8", diameter=8, clr=14, wall=1.0)
+    court = conventions.get("bsa").build_straight("Z", 12.0, 8.0, tl8)
+    assert "tube_droit_court" in {i.code for i in validate.check(court, tl8)}
+
+
+def test_piece_hors_perimetre_n_a_aucune_geometrie():
+    """Le serveur ne doit jamais inventer un modèle pour une pièce écartée."""
+    import tempfile
+
+    from openpyxl import Workbook
+
+    from tubeiso.app.server import Session, create_app
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["REP", "CODE_MAT", "LONGUEUR", "LISTE", "PROGRAMME",
+                   "PROGCRIPPA", "DROIT"])
+        ws.append(["9", "769-421-050", 5000, "L", "P", "", "Vrai"])
+        ws.append(["412", "293-421-006", 263, "L", "P2", PROG, "Faux"])
+        source = Path(tmp) / "BCH_X_0001-0000-AA.xlsx"
+        wb.save(source)
+
+        s = Session()
+        s.open_lft(str(source))
+        c = create_app(s).test_client()
+        tubes = [t for l in c.get("/api/tubes").get_json()["lots"]
+                 for t in l["tubes"]]
+        souple = next(t for t in tubes if t["ref"] == "9")
+        assert souple["scope"] == "exclue" and souple["nature"] == "souple"
+
+        d = c.get(f"/api/tube/{souple['uid']}").get_json()
+        assert d["out_of_scope"] is True
+        assert d["polyline"] == [] and d["bends"] == [] and d["mesh"] is None
+        assert "developed" not in d, "aucun développé pour une pièce écartée"
+
+        # et l'export la refuse, avec un motif
+        r = c.post("/api/export", json={"uids": [souple["uid"]], "dir": tmp,
+                                        "formats": ["step", "pdf"]}).get_json()
+        assert r["written"] == [] and r["failed"]
+        assert "hors périmètre" in r["failed"][0]["error"]
+
+
+def test_export_range_par_type():
+    """L'export manuel suit la même arborescence plate que la campagne."""
+    import tempfile
+
+    from tubeiso import batch
+
+    assert batch.folder_for("pdf") == "plans"
+    assert batch.folder_for(".stp") == "step"
+    assert batch.folder_for("json") == "donnees"
+    assert batch.folder_for("zzz") == "autres"
 
 
 def _run() -> int:

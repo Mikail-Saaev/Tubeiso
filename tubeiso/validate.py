@@ -29,6 +29,11 @@ DS_ROUNDING = 0.75
 # (cas connu du repere 412), soit un modele de longueur faux.
 DS_SUSPECT = 2.0
 
+# Un tube droit n'est pas cintre : les bornes machine ne s'appliquent pas. Ces
+# deux reperes ne servent qu'a signaler une donnee douteuse dans la LFT.
+MIN_STRAIGHT_PIECE = 20.0
+BAR_LENGTH = 6000.0
+
 
 @dataclass
 class Issue:
@@ -59,15 +64,30 @@ def check(tube: TubeProgram, tooling: Tooling,
             lvl = WARN
         out.append(Issue(lvl, "parseur", w))
 
-    # --- tube droit : quelques controles seulement
+    # --- tube droit : pas de cintrage, mais la matiere et la longueur doivent
+    # tenir debout. Un plan qui annonce Ø0 ou 12 mm de tube n'est pas fabricable.
     if tube.straight:
         L = sum(tube.straights)
         if L <= 0:
             out.append(Issue(ERROR, "longueur_absente",
                              "tube droit sans longueur exploitable"))
-        else:
-            out.append(Issue(INFO, "tube_droit",
-                             f"tube droit de {L:.0f} mm, aucun cintrage"))
+            return out
+        if not tube.diameter or tube.diameter <= 0:
+            out.append(Issue(ERROR, "diametre_absent",
+                             "diamètre inconnu : ni solide ni plan cotable",
+                             "CODE_MAT"))
+            return out
+        out.append(Issue(INFO, "tube_droit",
+                         f"tube droit Ø{tube.diameter:g} de {L:.0f} mm, "
+                         "aucun cintrage"))
+        if L < MIN_STRAIGHT_PIECE:
+            out.append(Issue(WARN, "tube_droit_court",
+                             f"{L:.0f} mm : longueur inhabituelle pour une pièce, "
+                             "vérifier la colonne LONGUEUR", "colonne LFT"))
+        elif L > BAR_LENGTH:
+            out.append(Issue(INFO, "tube_droit_long",
+                             f"{L:.0f} mm > {BAR_LENGTH:.0f} mm : au-delà de la "
+                             "barre standard, vérifier l'approvisionnement"))
         return out
 
     if not tube.complete:

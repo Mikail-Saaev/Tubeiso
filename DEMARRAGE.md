@@ -142,26 +142,26 @@ plusieurs heures de calcul.
 
 ```
 bibliotheque_tubes/
-  INDEX.xlsx                         ← commencez ici
+  INDEX.xlsx     ← commencez ici
   rapport.csv
   journal.txt
-  BSH/
-    PLATINE_82_0889/
-      BCH_PLATINE_82_0889_0877-0000-CL/
-        BCH_…_cahier.pdf             tous les plans du lot, à imprimer
-        BCH_…_recapitulatif.csv
-        plans/223.pdf                le plan à envoyer au sous-traitant
-        modeles_3d/223.stp           le solide
-        donnees/223.json             toutes les données techniques
+  plans/         BCH_PLATINE_82_0889_0877-0000-CL_223.pdf   ← pour le sous-traitant
+  step/          BCH_PLATINE_82_0889_0877-0000-CL_223.stp   ← le solide
+  donnees/       BCH_PLATINE_82_0889_0877-0000-CL_223.json  ← les données
+  cahiers/       BCH_PLATINE_82_0889_0877-0000-CL_cahier.pdf ← à imprimer
 ```
+
+Un dossier par type, sans niveau imbriqué : le nom du fichier porte sa LFT et
+son repère, donc on retrouve n'importe quel tube par une simple recherche dans
+`plans/`. Le groupe et la machine sont des colonnes filtrables d'`INDEX.xlsx`.
 
 `INDEX.xlsx` est la porte d'entrée : une ligne par tube, un filtre sur chaque
 colonne, et les chemins du plan, du modèle et du JSON cliquables. Trois
 onglets : *Tubes*, *LFT* et *Campagne*.
 
 La campagne est **reprenable** : relancée sur le même dossier de sortie, elle
-saute les LFT déjà traitées. Un fichier illisible n'interrompt rien, il est
-journalisé.
+saute les LFT déjà traitées — l'état est noté dans `.tubeiso-etat.json`, à la
+racine. Un fichier illisible n'interrompt rien, il est journalisé.
 
 ### Combien de temps
 

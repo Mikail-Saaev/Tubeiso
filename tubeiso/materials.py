@@ -159,7 +159,15 @@ FINISH = "acier zingué"
 
 
 def digits(code: object) -> str:
-    """'293-421-008', '293 421 008' et 'BSA293421008' donnent le meme resultat."""
+    """'293-421-008', '293 421 008' et 'BSA293421008' donnent le meme resultat.
+
+    openpyxl rend un code saisi sans tiret comme un NOMBRE. Un entier se
+    convertit sans dommage, mais un flottant devient « 293421008.0 » et sa
+    decimale s'ajoutait au code : Ø8 devenait un code inconnu. On coupe donc
+    la partie fractionnaire avant tout.
+    """
+    if isinstance(code, float) and code.is_integer():
+        code = int(code)
     return re.sub(r"\D", "", str(code or ""))
 
 

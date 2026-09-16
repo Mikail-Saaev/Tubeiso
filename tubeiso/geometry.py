@@ -186,6 +186,9 @@ def developed_length(tube: TubeProgram) -> float:
     return total
 
 
+COLLISION_SAMPLE = 260
+
+
 def min_segment_distance(cl: Centerline, diameter: float = 0.0,
                          clr: float = 0.0) -> float:
     """Plus petite distance entre deux portions ELOIGNEES le long du tube.
@@ -200,6 +203,13 @@ def min_segment_distance(cl: Centerline, diameter: float = 0.0,
         return float("inf")
     seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
     s = np.concatenate([[0.0], np.cumsum(seg)])
+    # Matrice N x N : sur une piece a trente coudes elle pese un demi-million
+    # de distances. On echantillonne — un rapprochement se voit aussi bien sur
+    # un point sur trois, et le seuil d'alerte est en millimetres, pas en
+    # micrometres.
+    if len(p) > COLLISION_SAMPLE:
+        idx = np.unique(np.linspace(0, len(p) - 1, COLLISION_SAMPLE).astype(int))
+        p, s = p[idx], s[idx]
     gap = max(5.0 * diameter, 2.0 * clr, 15.0)
     d3 = np.linalg.norm(p[:, None, :] - p[None, :, :], axis=-1)
     far = np.abs(s[:, None] - s[None, :]) > gap

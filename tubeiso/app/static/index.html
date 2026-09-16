@@ -17,16 +17,20 @@
     <span>tubeiso</span>
   </div>
   <div class="bar-actions">
-    <button id="browse" class="primary">Parcourir…</button>
-    <input id="file" type="file" accept=".xlsx,.xlsm,.stp,.step" hidden>
-    <input id="path" type="text" spellcheck="false"
-           placeholder="…ou collez un chemin : LFT (.xlsx) ou modèle (.stp)">
-    <button id="open">Ouvrir</button>
+    <div class="filezone">
+      <button id="browse" title="Choisir un fichier LFT ou un modèle STEP">Parcourir…</button>
+      <span class="divider"></span>
+      <input id="file" type="file" accept=".xlsx,.xlsm,.stp,.step" hidden>
+      <input id="path" type="text" spellcheck="false"
+             placeholder="chemin d'un LFT (.xlsx) ou d'un modèle (.stp)">
+      <span class="divider"></span>
+      <button id="open" class="go" title="Ouvrir ce fichier">Ouvrir</button>
+    </div>
+    <span class="grow"></span>
+    <button id="exportOne" title="Exporter la pièce sélectionnée">Exporter la pièce</button>
+    <button id="exportAll" class="primary" title="Exporter toutes les pièces du fichier">Tout exporter</button>
     <span class="sep"></span>
-    <button id="exportOne">Exporter la pièce</button>
-    <button id="exportAll">Tout exporter</button>
-    <span class="sep"></span>
-    <button id="openBatch">Campagne…</button>
+    <button id="openBatch" title="Traiter un dossier entier de LFT">Campagne…</button>
   </div>
 </header>
 
@@ -42,6 +46,7 @@
       <span><i class="dot info"></i>conforme</span>
       <span><i class="dot warn"></i>alerte</span>
       <span><i class="dot err"></i>erreur</span>
+      <span><i class="dot out"></i>hors périmètre</span>
     </div>
   </aside>
 
@@ -119,6 +124,9 @@
 <dialog id="exportDlg">
   <form method="dialog">
     <h3>Exporter</h3>
+    <p class="hint">Les fichiers sont nommés <code>&lt;nom du LFT&gt;_&lt;repère&gt;</code> —
+      par exemple <code>BCH_PLATINE_82_0889_0877-0000-CL_170.pdf</code> — pour se
+      rattacher à leur source sans qu'on ait à les ouvrir.</p>
     <label>Dossier de destination
       <span class="pickrow">
         <input id="outDir" type="text" value="." spellcheck="false">
@@ -128,15 +136,19 @@
     </label>
     <fieldset>
       <legend>Formats</legend>
-      <label><input type="checkbox" value="step" checked> STEP AP214 <em>— livrable sous-traitance</em></label>
-      <label><input type="checkbox" value="stl"> STL <em>— visualisation</em></label>
-      <label><input type="checkbox" value="pdf" checked> Plan PDF A4 <em>— fabrication, 2 pages</em></label>
-      <label><input type="checkbox" value="svg"> Plan SVG <em>— aperçu</em></label>
-      <label><input type="checkbox" value="brep"> BREP <em>— natif OpenCascade</em></label>
-      <label><input type="checkbox" value="dxf"> DXF <em>— reprise CAO</em></label>
+      <label><input type="checkbox" value="step" checked> STEP AP214 <em>livrable sous-traitance</em></label>
+      <label><input type="checkbox" value="pdf" checked> Plan PDF A4 <em>fabrication, 2 pages</em></label>
+      <label><input type="checkbox" value="json"> Données JSON <em>reprise informatique</em></label>
+      <label><input type="checkbox" value="stl"> STL <em>visualisation</em></label>
+      <label><input type="checkbox" value="brep"> BREP <em>natif OpenCascade</em></label>
+      <label><input type="checkbox" value="dxf"> DXF <em>reprise CAO</em></label>
+      <label><input type="checkbox" value="svg"> Plan SVG <em>aperçu</em></label>
     </fieldset>
-    <p class="hint">Les fichiers sont nommés <code>&lt;nom du LFT&gt;_&lt;repère&gt;</code>,
-      par exemple <code>BCH_PLATINE_82_0889_0877-0000-CL_170.pdf</code>.</p>
+    <fieldset>
+      <legend>Rangement</legend>
+      <label><input type="checkbox" id="byType" checked> Un dossier par type de fichier
+        <em>plans/ · step/ · donnees/</em></label>
+    </fieldset>
     <menu>
       <button value="cancel">Annuler</button>
       <button id="doExport" value="ok" class="primary">Exporter</button>
@@ -147,9 +159,10 @@
 <dialog id="batchDlg">
   <form method="dialog">
     <h3>Campagne — traiter des milliers de LFT</h3>
-    <p class="hint">Chaque fichier <code>.xlsx</code> / <code>.xlsm</code> du dossier
-      est lu, puis rangé en <b>Groupe → Machine → LFT</b> avec son plan, son modèle
-      et ses données. Un <code>INDEX.xlsx</code> récapitule le tout.</p>
+    <p class="hint">Chaque fichier <code>.xlsx</code> ou <code>.xlsm</code> du dossier est
+      lu, puis rangé à plat : <b>plans/</b>, <b>step/</b>, <b>donnees/</b>, <b>cahiers/</b>.
+      Le nom du fichier porte sa LFT et son repère, et <code>INDEX.xlsx</code> donne le
+      groupe, la machine et l'état de chaque pièce.</p>
 
     <label>Dossier des LFT <em>— parcouru récursivement</em>
       <span class="pickrow">

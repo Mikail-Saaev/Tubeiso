@@ -163,11 +163,24 @@ def project_ortho(pts: np.ndarray, plane: str) -> np.ndarray:
     return np.column_stack([pts[:, 1], -pts[:, 2]])
 
 
+# La recherche d'azimut compare toutes les paires de points, pour chacun des
+# 36 azimuts essayes. Sur un tube a 30 coudes, cela faisait 750 points, donc
+# 20 millions de distances par plan — presque une seconde, et ce cout explose
+# sur une campagne de plusieurs milliers de pieces. Un echantillon suffit
+# largement : on cherche une ORIENTATION, pas une cote.
+AZIMUTH_SAMPLE = 140
+
+
 def best_azimuth(cl: Centerline, diameter: float, step: float = 10.0) -> float:
     """Azimut qui separe le mieux a l'ecran les portions eloignees en 3D."""
     p = cl.points
     if len(p) < 4:
         return 0.0
+    if len(p) > AZIMUTH_SAMPLE:
+        # On garde les extremites et les sommets en echantillonnant
+        # regulierement : la silhouette est conservee.
+        idx = np.unique(np.linspace(0, len(p) - 1, AZIMUTH_SAMPLE).astype(int))
+        p = p[idx]
     d3 = np.linalg.norm(p[:, None, :] - p[None, :, :], axis=-1)
     far = d3 > max(4.0 * diameter, 12.0)
     if not far.any():

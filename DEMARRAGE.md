@@ -98,7 +98,8 @@ python -m tubeiso.cli init                                # tooling.json
 ```
 
 Commencez toujours par `inspect` sur un fichier inconnu : il ne trace rien, et
-il vous dit tout de suite combien de pièces entrent dans le périmètre.
+il vous dit tout de suite ce que chaque pièce produira — plan coté, plan de
+débit, fiche de débit, ou rien.
 
 ---
 
@@ -134,9 +135,9 @@ python -m tubeiso.cli batch D:\LFT -o D:\essai --limit 20 --no-3d
 ```
 
 Vingt fichiers, aucun solide : quelques secondes. Ouvrez ensuite
-`D:\essai\journal.txt`, qui donne la proportion de pièces exploitables et les
-motifs d'exclusion. C'est là qu'on voit si le parc est prêt, avant d'engager
-plusieurs heures de calcul.
+`D:\essai\journal.txt`, qui donne la répartition des livrables et les motifs
+relevés. C'est là qu'on voit si le parc est prêt, avant d'engager plusieurs
+heures de calcul.
 
 ### Ce que vous obtenez
 
@@ -146,10 +147,17 @@ bibliotheque_tubes/
   rapport.csv
   journal.txt
   plans/         BCH_PLATINE_82_0889_0877-0000-CL_223.pdf   ← pour le sous-traitant
+  debits/        BCH_PLATINE_82_0889_0877-0000-CL_2.pdf     ← forme non définie
   step/          BCH_PLATINE_82_0889_0877-0000-CL_223.stp   ← le solide
   donnees/       BCH_PLATINE_82_0889_0877-0000-CL_223.json  ← les données
   cahiers/       BCH_PLATINE_82_0889_0877-0000-CL_cahier.pdf ← à imprimer
 ```
+
+`debits/` contient les **fiches de débit** : une page par pièce dont la forme
+n'est pas calculable — un tuyau souple, une pièce façonnée à la main. Elles
+portent la matière, la longueur et la quantité, sous un bandeau orange qui dit
+que ce n'est pas un plan de fabrication. Elles sont rangées à part pour qu'on
+ne puisse pas les glisser par erreur dans le dossier envoyé au sous-traitant.
 
 Un dossier par type, sans niveau imbriqué : le nom du fichier porte sa LFT et
 son repère, donc on retrouve n'importe quel tube par une simple recherche dans
@@ -240,12 +248,22 @@ chaque module et l'erreur exacte qui l'empêche de se charger.
 **`colonne PROGCRIPPA absente`** — votre colonne porte un autre nom. En ligne
 de commande, ajoutez `--column NOM_DE_LA_COLONNE`.
 
-**Beaucoup de pièces « hors périmètre »** — c'est normal, et c'est voulu :
-l'application ne traite que les tuyaux équipés d'une PROGCRIPPA. Le motif est
-affiché pour chacune. `matière_souple` désigne un tuyau qui n'est pas cintré
-sur la Crippa ; `tube_droit_sans_programme` un tube laissé droit ;
-`programme_tronqué` un export Excel qui a coupé le champ texte à 255
-caractères — là, le problème est dans la chaîne d'export, pas dans l'outil.
+**Des pièces en « débit seul »** — ce ne sont pas des exclusions. Leur forme
+n'est pas calculable, mais leur matière et leur longueur le sont : elles
+sortent une fiche de débit dans `debits/`. `matière_souple` désigne un tuyau
+qui n'est pas cintré sur la Crippa ; `plié_à_la_main` une pièce façonnée hors
+machine ; `hors_outillage_crippa` des coudes à un diamètre pour lequel BSA n'a
+pas de matrice.
+
+**Des pièces « sans livrable »** — celles-là n'ont ni longueur ni matière
+identifiable. En pratique elles sont rares, et la ligne LFT est à corriger.
+
+**Un plan sans son STEP** — la géométrie n'est pas fiable. Le cas courant est
+`programme_tronqué` : l'export Excel a coupé le champ texte à 255 caractères et
+la fin du programme manque. Quand le développé recalculé s'écarte du R6, le
+plan est écrit avec un bandeau **ERREUR** qui chiffre le métrage manquant, mais
+le modèle 3D est refusé. La colonne *Pas de 3D — motif* d'`INDEX.xlsx` les
+liste. Le problème est alors dans la chaîne d'export Crippa, pas dans l'outil.
 
 **Le bouton `Parcourir…` ne fait rien** — la fenêtre de sélection s'appuie sur
 Tk, absent de certaines installations Python minimales. Le message vous le dit,

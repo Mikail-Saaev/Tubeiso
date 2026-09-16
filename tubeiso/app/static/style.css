@@ -314,6 +314,9 @@ section.lot { margin-bottom: 10px; }
 .list li.on .ref { color: var(--accent-2); }
 .list li.out { opacity: .58; }
 .list li.out:hover { opacity: .85; }
+/* Une pièce en fiche de débit N'EST PAS écartée : elle produit un fichier.
+   Elle reste donc pleinement lisible, et c'est sa pastille qui la distingue. */
+.list li.debit .meta { color: var(--warn); }
 
 .list .ref {
   font: 600 12.5px/1 var(--sans);
@@ -355,14 +358,19 @@ section.lot { margin-bottom: 10px; }
 .dot.warn { background: var(--warn); }
 .dot.err  { background: var(--err); }
 .dot.out  { background: var(--ink-3); }
+/* Anneau plutôt que disque : la pièce sort un fichier, mais pas un plan. */
+.dot.debit {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--warn);
+}
 
 .legend {
   flex: none;
-  display: flex; gap: 12px; flex-wrap: wrap;
+  display: flex; gap: 9px; flex-wrap: wrap;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
   color: var(--ink-3);
-  font-size: 11px;
+  font-size: 10.5px;
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 
@@ -543,6 +551,7 @@ dl.kv dd {
 }
 dl.kv dd b.good { color: var(--ok); }
 dl.kv dd b.bad  { color: var(--err); }
+dl.kv dd b.warn-txt { color: var(--warn); }
 .kv .nat { display: inline-block; }
 .kv .nat.rigide { background: var(--ok-bg); color: var(--ok); }
 
@@ -840,6 +849,25 @@ dialog menu {
 
 
 /* --- pièce hors périmètre : la vue 3D reste vide, et le dit ---------------- */
+/* Bandeau « géométrie non fiable ». Il est posé sur la vue 3D parce que c'est
+   la vue qui trompe : elle montre un tube plausible alors qu'il manque des
+   blocs au programme. */
+.nomodel {
+  position: absolute;
+  top: 10px; left: 50%; transform: translateX(-50%);
+  max-width: 82%;
+  padding: 7px 14px;
+  border: 1px solid var(--err);
+  border-radius: 5px;
+  background: var(--err-bg, #2A1512);
+  color: var(--err);
+  font: 600 11.5px/1.45 var(--sans);
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
+}
+.nomodel span { display: block; font-weight: 400; color: var(--ink-2); }
+
 #canvas-wrap > .hint b { display: block; color: var(--ink); font-size: 14px;
   margin-bottom: 6px; }
 #canvas-wrap > .hint .muted { color: var(--ink-3); font-size: 11.5px; }

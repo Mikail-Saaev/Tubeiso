@@ -205,7 +205,10 @@ def parse(text: str, ref: str = "") -> RawProgram:
             continue
 
     if not prog.complete:
-        prog.warnings.append("pas de M30 : programme incomplet, geometrie inexploitable")
+        # Constat, pas verdict : c'est le controle de longueur qui dira si la
+        # troncature a coute de la geometrie ou seulement la fin de ligne.
+        prog.warnings.append("pas de M30 : fin de programme absente, "
+                             "troncature a verifier")
     if not prog.blocks:
         prog.warnings.append("aucun bloc de cintrage trouve")
     if prog.blocks and prog.blocks[-1].sub != 3:

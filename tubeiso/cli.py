@@ -20,7 +20,6 @@ from . import (batch, bsa, calibrate, conventions, geometry, lft, materials,
                registry, render, scope, solid, validate)
 from .config import Config, code_mat_diameter
 from .parsers import crippa
-from .validate import ERROR
 
 
 def _load(path: str, column: str = "PROGCRIPPA"):
@@ -45,12 +44,29 @@ def _load(path: str, column: str = "PROGCRIPPA"):
     return book, out
 
 
+def _centerline(tube, cfg):
+    """Fibre neutre, ou None si elle ne se construit pas.
+
+    Le controle de longueur DOIT s'appuyer dessus : c'est elle qui sert a
+    exporter le solide, et elle seule dit ce que la piece mesure vraiment.
+    Une somme de segments faite a part peut compter des droites que la
+    geometrie, elle, n'utilise pas — et sous-estimer alors la matiere perdue
+    par une troncature.
+    """
+    try:
+        return geometry.build(tube, handedness=cfg.handedness)
+    except Exception:
+        return None
+
+
 def _make(cfg, rec, raw, verdict=None):
     """Construit la piece retenue et ses controles, cintree ou droite."""
     conv = conventions.get(cfg.convention)
     if verdict is not None and verdict.straight:
-        tooling = cfg.for_program("", verdict.diameter, rec.get("CODE_MAT"))
-        length = float(rec.number("LONGUEUR") or 0.0)
+        # `scope.tooling_for` complete la paroi depuis le catalogue matiere :
+        # sans elle le solide exporte serait plein au lieu d'etre creux.
+        tooling = scope.tooling_for(cfg, verdict, rec)
+        length = float(verdict.length or rec.number("LONGUEUR") or 0.0)
         tube = conv.build_straight(rec.rep or rec.program_number or rec.key,
                                    length, verdict.diameter or tooling.diameter,
                                    tooling)
@@ -58,9 +74,11 @@ def _make(cfg, rec, raw, verdict=None):
         tube.program_number = rec.program_number
         tube.warnings.extend(rec.warnings)
         return tube, tooling, 0.0, validate.check(
-            tube, tooling, length_tol=cfg.tolerance, lft_length=length)
+            tube, tooling, centerline=_centerline(tube, cfg),
+            length_tol=cfg.tolerance, lft_length=length)
 
-    diameter = raw.diameter or materials.diameter(rec.get("CODE_MAT"))
+    diameter = raw.diameter or (verdict.diameter if verdict else None) \
+        or materials.diameter(rec.get("CODE_MAT"))
     tooling = cfg.for_program(raw.tooling, diameter, rec.get("CODE_MAT"))
     recut = rec.recut or float(raw.recut or 0.0)
     tube = conv.build(raw, tooling, recut=recut, angle_mode=cfg.angle_mode)
@@ -68,10 +86,25 @@ def _make(cfg, rec, raw, verdict=None):
     tube.list_number = rec.list_number
     tube.program_number = rec.program_number
     tube.warnings.extend(rec.warnings)
-    issues = validate.check(tube, tooling, recut=recut,
-                            length_tol=cfg.tolerance,
+    issues = validate.check(tube, tooling, centerline=_centerline(tube, cfg),
+                            recut=recut, length_tol=cfg.tolerance,
                             lft_length=rec.number("LONGUEUR"))
     return tube, tooling, recut, issues
+
+
+def _debit_data(cfg, rec, verdict, source, entry=None):
+    """Piece sans forme definie : de quoi remplir une fiche de debit."""
+    conv = conventions.get(cfg.convention)
+    tooling = scope.tooling_for(cfg, verdict, rec)
+    length = float(verdict.length or rec.number("LONGUEUR") or 0.0)
+    ref = rec.rep or rec.program_number or rec.key
+    tube = conv.build_straight(ref, length, verdict.diameter or 0.0, tooling)
+    tube.list_number = rec.list_number
+    tube.program_number = rec.program_number
+    tube.comment = verdict.detail or "forme non définie"
+    tube.straight = False
+    cl = geometry.build(tube, handedness=cfg.handedness) if length > 0 else None
+    return _plan_data(cfg, rec, tube, tooling, cl, [], source, entry)
 
 
 def _plan_data(cfg, rec, tube, tooling, cl, issues, source, entry=None, raw=None):
@@ -112,6 +145,8 @@ def cmd_inspect(args) -> int:
 
     counts = {validate.INFO: 0, validate.WARN: 0, validate.ERROR: 0}
     motifs: dict[str, int] = {}
+    statuts = {scope.TRAITE: 0, scope.DROIT: 0, scope.DEBIT: 0, scope.EXCLU: 0}
+    sans_3d = 0
     pairs = {id(rec): raw for rec, raw in data}
     for lot in book.lots:
         print(f"LOT {lot.label}   -   {len(lot.tubes)} piece(s)")
@@ -122,27 +157,49 @@ def cmd_inspect(args) -> int:
             raw = pairs.get(id(rec))
             verdict = scope.evaluate(rec, raw)
             ref = rec.rep or rec.program_number or rec.key
-            if not verdict.ok:
+            statuts[verdict.status] = statuts.get(verdict.status, 0) + 1
+            if verdict.reason:
                 motifs[verdict.reason] = motifs.get(verdict.reason, 0) + 1
+
+            if not verdict.ok:
                 print(f"  {ref:>7} {rec.program_number:>18} {verdict.kind:>7} "
                       f"{str(verdict.diameter or '-'):>4} {'-':>7} {'-':>3}  "
                       f"exclue   {verdict.reason} — {verdict.detail[:44]}")
                 continue
+
+            if verdict.cut_only:
+                # Pas de geometrie : ni cotes, ni controles. Seul le debit sort.
+                lg = f"{verdict.length:.0f}" if verdict.length else "-"
+                print(f"  {ref:>7} {rec.program_number:>18} {verdict.kind:>7} "
+                      f"{str(verdict.diameter or '-'):>4} {lg:>7} {'-':>3}  "
+                      f"debit    {verdict.reason} — {verdict.detail[:44]}")
+                continue
+
             tube, tooling, _recut, issues = _make(cfg, rec, raw, verdict)
             worst = validate.worst(issues)
             counts[worst] += 1
             detail = next((i.message for i in issues if i.level == worst), "conforme")
             mark = "droit" if verdict.straight else ""
+            blocked = validate.unsafe(issues)
+            if blocked:
+                sans_3d += 1
+                mark = (mark + " sans-3D").strip()
             print(f"  {ref:>7} {rec.program_number:>18} {verdict.kind:>7} "
                   f"{tube.diameter:>4.0f} {tube.declared_length or 0:>7.0f} "
                   f"{tube.n_bends:>3}  {worst:8s} {mark} {detail[:38]}")
         print()
 
-    total_excl = sum(motifs.values())
+    modelisees = statuts[scope.TRAITE] + statuts[scope.DROIT]
     print(f"{counts[validate.INFO]} conforme(s), {counts[validate.WARN]} alerte(s), "
-          f"{counts[validate.ERROR]} erreur(s) sur {len(data) - total_excl} piece(s) traitees.")
+          f"{counts[validate.ERROR]} erreur(s) sur {modelisees} piece(s) mises en plan.")
+    print(f"  {statuts[scope.TRAITE]:4d}  cintrees      plan cote + modele 3D")
+    print(f"  {statuts[scope.DROIT]:4d}  tubes droits  plan de debit + modele 3D")
+    print(f"  {statuts[scope.DEBIT]:4d}  debit seul    fiche de debit, forme non definie")
+    print(f"  {statuts[scope.EXCLU]:4d}  sans livrable rien a mettre sur le papier")
+    if sans_3d:
+        print(f"  {sans_3d:4d}  sans 3D       geometrie non fiable, plan seul")
     if motifs:
-        print(f"\n{total_excl} piece(s) hors perimetre :")
+        print("\nMotifs relevés :")
         for motif, n in sorted(motifs.items(), key=lambda kv: -kv[1]):
             print(f"  {n:4d}  {motif:26s} {scope.LIBELLES.get(motif, '')}")
     if book.warnings:
@@ -177,7 +234,7 @@ def cmd_plan(args) -> int:
     _book, data = _load(args.source, args.column)
     entry = registry.Registry.load(args.repertoire).resolve(args.source)
 
-    made, skipped = 0, 0
+    made, debits, skipped, alertes = 0, 0, 0, 0
     sheets: list[render.PlanData] = []
     excluded: list[dict] = []
     for rec, raw in data:
@@ -186,21 +243,28 @@ def cmd_plan(args) -> int:
         if not verdict.ok:
             excluded.append({"repere": ref, "motif": verdict.reason,
                              "detail": verdict.detail})
-            print(f"  {ref:>7}  hors perimetre : {verdict.reason}")
+            print(f"  {ref:>7}  sans livrable : {verdict.reason}")
             skipped += 1
+            continue
+
+        if verdict.cut_only:
+            # Forme non definie : une fiche de debit, qui ne peut pas passer
+            # pour un plan. Elle ne rejoint donc pas le cahier des plans.
+            pdata = _debit_data(cfg, rec, verdict, args.source, entry)
+            base = registry.output_basename(args.source, ref)
+            fiche = render.debit_sheet(pdata, out / f"{base}.pdf",
+                                       verdict.reason, verdict.detail)
+            excluded.append({"repere": ref, "motif": verdict.reason,
+                             "detail": verdict.detail, "fiche": True})
+            print(f"  {ref:>7}  {fiche.name:28s} FICHE DE DEBIT")
+            debits += 1
             continue
 
         tube, tooling, recut, issues = _make(cfg, rec, raw, verdict)
-        blocking = [i for i in issues if i.level == ERROR]
-        if blocking and not args.force:
-            print(f"  {ref:>7}  IGNOREE")
-            for i in blocking:
-                print(f"           {i}")
-            excluded.append({"repere": ref, "motif": "controle_bloquant",
-                             "detail": blocking[0].message})
-            skipped += 1
-            continue
-
+        # Un controle en erreur ne supprime pas le plan : il le marque. Un plan
+        # au bandeau ERREUR, qui dit ce qui cloche, vaut mieux qu'une piece
+        # absente du dossier, que personne ne pensera a corriger. C'est le
+        # modele 3D, lui, qui est refuse quand la geometrie est fausse.
         try:
             cl = geometry.build(tube, handedness=cfg.handedness)
         except (geometry.MissingRadius, ValueError) as exc:
@@ -220,7 +284,11 @@ def cmd_plan(args) -> int:
         if args.dxf:
             render.to_dxf(tube, cl, str(out / f"{base}.dxf"))
         sheets.append(pdata)
-        print(f"  {ref:>7}  {pdf.name:28s} {validate.worst(issues)}")
+        blocked = validate.unsafe(issues)
+        if blocked:
+            alertes += 1
+        print(f"  {ref:>7}  {pdf.name:28s} {validate.worst(issues)}"
+              + (f"  — pas de 3D : {blocked}" if blocked else ""))
         made += 1
 
     if sheets and not args.no_booklet:
@@ -229,8 +297,12 @@ def cmd_plan(args) -> int:
                                 lot_label=label, excluded=excluded)
         print(f"\nCahier du lot : {cahier.name}")
 
-    print(f"\n{made} plan(s) generes, {skipped} ignoree(s). Dossier : {out}")
-    return 0 if made else 1
+    print(f"\n{made} plan(s), {debits} fiche(s) de debit, {skipped} ignoree(s). "
+          f"Dossier : {out}")
+    if alertes:
+        print(f"{alertes} plan(s) portent le bandeau ERREUR : leur geometrie "
+              "n'est pas fiable, aucun modele 3D ne doit en etre tire.")
+    return 0 if (made or debits) else 1
 
 
 def cmd_model(args) -> int:
@@ -245,16 +317,20 @@ def cmd_model(args) -> int:
         ref = rec.rep or rec.program_number or rec.key
         verdict = scope.evaluate(rec, raw)
         if not verdict.ok:
-            print(f"  {ref:>7}  hors perimetre : {verdict.reason}")
+            print(f"  {ref:>7}  sans livrable : {verdict.reason}")
+            skipped += 1
+            continue
+        if verdict.cut_only:
+            print(f"  {ref:>7}  pas de 3D : {verdict.reason} — forme non definie")
             skipped += 1
             continue
 
         tube, tooling, recut, issues = _make(cfg, rec, raw, verdict)
-        blocking = [i for i in issues if i.level == ERROR]
-        if blocking and not args.force:
-            print(f"  {ref:>7}  IGNOREE")
-            for i in blocking:
-                print(f"           {i}")
+        blocked = validate.unsafe(issues)
+        if blocked and not args.force:
+            # La geometrie est fausse, pas seulement douteuse : un STEP faux
+            # part en fabrication sans que personne ne relise le plan.
+            print(f"  {ref:>7}  PAS DE MODELE : {blocked}")
             skipped += 1
             continue
         try:
@@ -308,11 +384,15 @@ def cmd_batch(args) -> int:
     print(f"  pieces            : {s['pieces']}")
     print(f"  cintrees          : {s['traitees']}")
     print(f"  tubes droits      : {s['tubes_droits']}")
-    print(f"  hors perimetre    : {s['exclues']}")
+    print(f"  fiches de debit   : {s['debits']}")
+    print(f"  sans livrable     : {s['exclues']}")
     print(f"  plans PDF         : {s['plans']}")
-    print(f"  modeles 3D        : {s['modeles_3d']}")
+    print(f"  fiches PDF        : {s['fiches_debit']}")
+    print(f"  modeles 3D        : {s['modeles_3d']}"
+          + (f"   ({s['sans_3d']} refuses : geometrie non fiable)"
+             if s["sans_3d"] else ""))
     if s["motifs"]:
-        print("\n  motifs d'exclusion :")
+        print("\n  motifs releves :")
         for motif, n in s["motifs"].items():
             print(f"    {n:6d}  {motif}")
     print(f"\n  index    : {Path(args.output) / 'INDEX.xlsx'}")
@@ -351,7 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--step", action="store_true", default=True)
     s.add_argument("--stl", action="store_true", help="maillage, pour visualisation")
     s.add_argument("--brep", action="store_true", help="format natif OpenCascade")
-    s.add_argument("--force", action="store_true")
+    s.add_argument("--force", action="store_true",
+                   help="ecrire le solide meme quand la geometrie est jugee "
+                        "non fiable — a n'utiliser que pour diagnostiquer")
     s.set_defaults(func=cmd_model)
 
     s = sub.add_parser("plan", help="plans PDF autoportants")
@@ -364,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-booklet", action="store_true",
                    help="ne pas assembler le cahier du lot")
     s.add_argument("--force", action="store_true",
-                   help="tracer meme si des controles bloquants sont detectes")
+                   help=argparse.SUPPRESS)      # conserve : plus aucun effet
     s.set_defaults(func=cmd_plan)
 
     s = sub.add_parser("batch", help="campagne sur des milliers de LFT")

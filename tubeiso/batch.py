@@ -9,6 +9,7 @@ ranges **a plat, un dossier par type de fichier** :
       rapport.csv       le meme contenu, en texte
       journal.txt       ce qui s'est passe, fichier par fichier
       plans/            <LFT>_<REPERE>.pdf     le plan autoportant
+      debits/           <LFT>_<REPERE>.pdf     la fiche de debit, sans geometrie
       step/             <LFT>_<REPERE>.stp     le solide, pour la sous-traitance
       donnees/          <LFT>_<REPERE>.json    toutes les donnees techniques
       cahiers/          <LFT>_cahier.pdf       tous les plans d'un lot
@@ -19,11 +20,18 @@ fichier porte deja sa LFT et son repere, donc la tracabilite est assuree sans
 qu'on ait a descendre trois niveaux. Le rattachement groupe / machine reste
 disponible, en colonne filtrable, dans `INDEX.xlsx`.
 
-Deux principes de fonctionnement :
+Trois principes de fonctionnement :
 
-* **seuls les tuyaux equipes d'une PROGCRIPPA sont traites** (voir `scope.py`).
-  Les autres ne produisent aucun fichier, mais figurent dans l'index avec leur
-  motif d'exclusion : une campagne rend compte de 100 % des lignes lues.
+* **une piece n'est ecartee que lorsqu'il n'y a rien a mettre sur le papier**
+  (voir `scope.py`). Un tube cintre sort en plan cote, un tube droit en plan de
+  debit, une piece sans forme definie en fiche de debit. Les rares lignes sans
+  longueur ni matiere ne produisent rien, mais figurent dans l'index avec leur
+  motif : une campagne rend compte de 100 % des lignes lues.
+
+* **aucun modele 3D n'est ecrit quand la geometrie n'est pas fiable.** Un
+  programme tronque qui a perdu de la matiere donne un plan marque ERREUR et
+  pas de STEP : un solide faux part chez un sous-traitant sans que personne ne
+  relise le plan.
 
 * **une campagne est reprenable.** Une LFT deja traitee est sautee, sauf
   `--force`. Un plantage sur un fichier n'interrompt pas la campagne : il est
@@ -48,9 +56,9 @@ SKIP_PREFIX = ("~$", ".")
 
 # Un dossier par type de fichier, a plat sous la racine de sortie.
 FOLDERS = {
-    "pdf": "plans", "step": "step", "stp": "step", "stl": "stl",
-    "brep": "brep", "dxf": "dxf", "json": "donnees", "cahier": "cahiers",
-    "svg": "apercus",
+    "pdf": "plans", "debit": "debits", "step": "step", "stp": "step",
+    "stl": "stl", "brep": "brep", "dxf": "dxf", "json": "donnees",
+    "cahier": "cahiers", "svg": "apercus",
 }
 STATE_FILE = ".tubeiso-etat.json"
 
@@ -119,7 +127,9 @@ class TubeRow:
     controle: str = ""
     anomalies: str = ""
     plan_pdf: str = ""
+    fiche_debit: str = ""
     modele_3d: str = ""
+    sans_3d: str = ""
     donnees: str = ""
     fichier_source: str = ""
     incident: str = ""
@@ -137,8 +147,13 @@ class LftResult:
 
     @property
     def treated(self) -> int:
+        """Pieces qui ont une geometrie : celles qui entrent dans le cahier."""
         return sum(1 for r in self.rows
                    if r.statut in (scope.TRAITE, scope.DROIT))
+
+    @property
+    def cut_only(self) -> int:
+        return sum(1 for r in self.rows if r.statut == scope.DEBIT)
 
     @property
     def excluded(self) -> int:
@@ -172,9 +187,12 @@ class Campaign:
             "pieces": len(rows),
             "traitees": sum(1 for r in rows if r.statut == scope.TRAITE),
             "tubes_droits": sum(1 for r in rows if r.statut == scope.DROIT),
+            "debits": sum(1 for r in rows if r.statut == scope.DEBIT),
             "exclues": sum(1 for r in rows if r.statut == scope.EXCLU),
             "plans": sum(1 for r in rows if r.plan_pdf),
+            "fiches_debit": sum(1 for r in rows if r.fiche_debit),
             "modeles_3d": sum(1 for r in rows if r.modele_3d),
+            "sans_3d": sum(1 for r in rows if r.sans_3d),
             "motifs": dict(sorted(motifs.items(), key=lambda kv: -kv[1])),
             "controles": controls,
         }
@@ -300,6 +318,41 @@ def _tube_json(data: render.PlanData, verdict: scope.Verdict,
     }
 
 
+def _debit_json(data: render.PlanData, verdict: scope.Verdict,
+                paths: dict) -> dict:
+    """Donnees d'une piece sans forme definie. Volontairement pauvre : il n'y a
+    ni coudes, ni sommets, ni developpe — annoncer le contraire serait faux."""
+    tube = data.tube
+    return {
+        "identification": {
+            "repere": tube.ref, "programme": tube.program_number or "",
+            "lot": tube.list_number, "lft": data.lft,
+            "groupe": data.groupe, "machine": data.machine,
+            "designation": data.designation, "fichier_source": data.source_file,
+        },
+        "matiere": verdict.as_dict(),
+        "debit": {
+            "longueur_lft": data.lft_length,
+            "longueur_a_debiter": data.lft_length or tube.declared_length,
+            "quantite": data.quantite,
+            "recoupe_depart": data.recoupe_1, "recoupe_arrivee": data.recoupe_2,
+        },
+        "forme": {
+            "definie": False,
+            "motif": verdict.reason,
+            "detail": verdict.detail,
+            "remarque_lft": data.remarque,
+            "gabarit": data.gabarit, "dessin": data.dessin,
+        },
+        "extremites": {"embout_depart": data.embout_1,
+                       "embout_arrivee": data.embout_2},
+        "statut_controle": "FICHE DE DÉBIT",
+        "fichiers": paths,
+        "genere_le": datetime.now().isoformat(timespec="seconds"),
+        "genere_par": "tubeiso",
+    }
+
+
 def process_file(source, out_root, options: Options,
                  entry: registry.Entry | None = None,
                  state: dict | None = None) -> LftResult:
@@ -324,7 +377,7 @@ def process_file(source, out_root, options: Options,
 
     conv = conventions.get(cfg.convention)
     plans_dir = out_root / folder_for("pdf")
-    models_dir = out_root / folder_for("step")
+    debits_dir = out_root / folder_for("debit")
     data_dir = out_root / folder_for("json")
     made: list[render.PlanData] = []
     excluded: list[dict] = []
@@ -348,10 +401,10 @@ def process_file(source, out_root, options: Options,
             verdict = scope.evaluate(rec, raw)
             row.statut, row.motif, row.detail = (verdict.status, verdict.reason,
                                                  verdict.detail)
-            # `motif` ne sert qu'aux exclusions : une piece qui sort des
-            # fichiers n'a pas de motif, sinon les comptes ne tombent plus.
-            if verdict.ok:
-                row.motif = ""
+            # Le motif est conserve meme quand la piece sort des fichiers : il
+            # dit POURQUOI elle sort une fiche de debit plutot qu'un plan, ou
+            # pourquoi son programme est signale. C'est la colonne qu'on trie
+            # dans l'index pour piloter la reprise des donnees.
             row.nature = verdict.kind
             if verdict.material:
                 row.matiere = verdict.material.designation
@@ -362,6 +415,46 @@ def process_file(source, out_root, options: Options,
             if not verdict.ok:
                 excluded.append({"repere": row.repere, "motif": row.motif,
                                  "detail": row.detail})
+                result.rows.append(row)
+                continue
+
+            # --- forme non definie : une fiche de debit, et rien d'autre.
+            if verdict.cut_only:
+                base = registry.output_basename(lft_code, row.repere)
+                try:
+                    data = _debit_build(rec, verdict, cfg, conv, entry,
+                                        lft_code, source)
+                except Exception as exc:
+                    row.statut, row.motif = scope.EXCLU, "échec_fiche_débit"
+                    row.detail = f"{type(exc).__name__}: {exc}"
+                    row.incident = traceback.format_exc(limit=2)
+                    excluded.append({"repere": row.repere, "motif": row.motif,
+                                     "detail": row.detail})
+                    result.rows.append(row)
+                    continue
+                row.longueur_debit = (round(float(verdict.length), 1)
+                                      if verdict.length else None)
+                row.controle = "FICHE DE DÉBIT"
+                row.sans_3d = "forme non définie"
+                paths = {}
+                if options.plans:
+                    try:
+                        pdf = render.debit_sheet(data, debits_dir / f"{base}.pdf",
+                                                 verdict.reason, verdict.detail)
+                        row.fiche_debit = _relative(pdf, out_root)
+                        paths["fiche_debit"] = row.fiche_debit
+                    except Exception as exc:
+                        row.incident = f"fiche : {type(exc).__name__}: {exc}"
+                data_dir.mkdir(parents=True, exist_ok=True)
+                json_path = data_dir / f"{base}.json"
+                json_path.write_text(
+                    json.dumps(_debit_json(data, verdict, paths),
+                               ensure_ascii=False, indent=2), encoding="utf-8")
+                row.donnees = _relative(json_path, out_root)
+                # Le cahier doit dire ou cette piece est passee, sinon on la
+                # cherche dans plans/ et on croit a un oubli.
+                excluded.append({"repere": row.repere, "motif": row.motif,
+                                 "detail": row.detail, "fiche": True})
                 result.rows.append(row)
                 continue
 
@@ -400,7 +493,15 @@ def process_file(source, out_root, options: Options,
                 except Exception as exc:
                     row.incident = f"plan : {type(exc).__name__}: {exc}"
 
-            if options.models:
+            # Un modele 3D n'est ecrit que si la geometrie tient debout. Un
+            # programme tronque qui a perdu de la matiere donne un plan marque
+            # ERREUR — mais surtout pas de solide, qui partirait en fabrication
+            # sans que personne ne relise le plan.
+            blocked = validate.unsafe(issues)
+            if blocked:
+                row.sans_3d = blocked
+
+            if options.models and not blocked:
                 for fmt in options.formats:
                     target_dir = out_root / folder_for(fmt)
                     try:
@@ -450,11 +551,32 @@ def process_file(source, out_root, options: Options,
     return result
 
 
+def _debit_build(rec, verdict, cfg, conv, entry, lft_code, source):
+    """Piece sans forme definie : juste de quoi remplir une fiche de debit.
+
+    On construit quand meme un tube droit fictif, pour n'avoir qu'un seul
+    chemin de donnees vers la mise en page — mais il n'est ni dessine, ni
+    exporte en 3D, et la fiche porte un bandeau qui l'annonce.
+    """
+    tooling = scope.tooling_for(cfg, verdict, rec)
+    length = float(verdict.length or rec.number("LONGUEUR") or 0.0)
+    ref = rec.rep or rec.program_number or rec.key
+    tube = conv.build_straight(ref, length, verdict.diameter or 0.0, tooling)
+    tube.list_number = rec.list_number
+    tube.program_number = rec.program_number
+    tube.comment = verdict.detail or "forme non définie"
+    tube.straight = False
+    tube.warnings.extend(rec.warnings)
+    cl = geometry.build(tube, handedness=cfg.handedness) if length > 0 else None
+    return _plan_data(rec, None, tube, cl, tooling, [], entry, lft_code,
+                      source, verdict.material, cfg)
+
+
 def _build(rec, raw, verdict, cfg, conv, entry, lft_code, source):
     """Construit la piece, sa geometrie et ses controles."""
     if verdict.straight:
         # Pas de programme : une droite, une longueur, un diametre. [Info Crippa]
-        tooling = cfg.for_program("", verdict.diameter, rec.get("CODE_MAT"))
+        tooling = scope.tooling_for(cfg, verdict, rec)
         length = float(rec.number("LONGUEUR") or 0.0)
         tube = conv.build_straight(rec.rep or rec.program_number or rec.key,
                                    length, verdict.diameter or tooling.diameter,
@@ -615,11 +737,14 @@ def _write_journal(path: Path, campaign: Campaign, reg: registry.Registry) -> No
         f"pièces rencontrées    : {s['pieces']}",
         f"pièces cintrées       : {s['traitees']}",
         f"tubes droits          : {s['tubes_droits']}",
-        f"pièces hors périmètre : {s['exclues']}",
+        f"fiches de débit       : {s['debits']}   (forme non définie)",
+        f"pièces sans livrable  : {s['exclues']}",
         f"plans PDF écrits      : {s['plans']}",
+        f"fiches de débit PDF   : {s['fiches_debit']}",
         f"modèles 3D écrits     : {s['modeles_3d']}",
+        f"modèles 3D refusés    : {s['sans_3d']}   (géométrie non fiable)",
         "",
-        "Motifs d'exclusion :",
+        "Motifs relevés :",
     ]
     for motif, n in s["motifs"].items():
         lines.append(f"  {n:6d}  {motif:26s} {scope.LIBELLES.get(motif, '')}")
@@ -641,13 +766,14 @@ INDEX_COLUMNS = [
     ("designation", "Désignation machine", 34), ("lft", "LFT", 34),
     ("lot", "Lot / LISTE", 16), ("repere", "Repère", 12),
     ("programme", "Programme", 18), ("statut", "Statut", 10),
-    ("motif", "Motif d'exclusion", 24), ("nature", "Nature", 10),
+    ("motif", "Motif", 24), ("nature", "Nature", 10),
     ("matiere", "Matière", 24), ("code_matiere", "Code BSA", 14),
     ("diametre", "Ø ext", 8), ("paroi", "Paroi", 8), ("rayon", "Rm", 8),
     ("coudes", "Coudes", 8), ("developpe", "Développé", 11),
     ("longueur_debit", "À débiter", 11), ("recoupe", "Recoupe", 9),
     ("controle", "Contrôle", 11), ("anomalies", "Anomalies", 34),
-    ("plan_pdf", "Plan PDF", 40), ("modele_3d", "Modèle 3D", 40),
+    ("plan_pdf", "Plan PDF", 40), ("fiche_debit", "Fiche de débit", 40),
+    ("modele_3d", "Modèle 3D", 40), ("sans_3d", "Pas de 3D — motif", 24),
     ("donnees", "Données", 40), ("incident", "Incident", 30),
 ]
 
@@ -663,7 +789,8 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor="0F5F7A")
     link_font = Font(color="0F5F7A", underline="single")
-    colours = {"CONFORME": "E9F3ED", "ALERTE": "FBF2E0", "ERREUR": "FAE9E7"}
+    colours = {"CONFORME": "E9F3ED", "ALERTE": "FBF2E0",
+               "ERREUR": "FAE9E7", "FICHE DE DÉBIT": "EDEFF2"}
 
     # --- feuille Tubes
     ws = wb.active
@@ -675,7 +802,7 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
         ws.column_dimensions[get_column_letter(j)].width = width
     ws.freeze_panes = "A2"
 
-    link_cols = {"plan_pdf", "modele_3d", "donnees"}
+    link_cols = {"plan_pdf", "fiche_debit", "modele_3d", "donnees"}
     for i, row in enumerate(campaign.rows, start=2):
         fill = colours.get(row.controle)
         for j, (key, _, _) in enumerate(INDEX_COLUMNS, start=1):
@@ -690,22 +817,24 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
 
     # --- feuille LFT
     ws2 = wb.create_sheet("LFT")
-    heads = ["Groupe", "Machine", "LFT", "Pièces", "Traitées", "Exclues",
-             "Cahier PDF", "Fichier source", "Incident"]
+    heads = ["Groupe", "Machine", "LFT", "Pièces", "Avec plan", "Débit seul",
+             "Sans livrable", "Cahier PDF", "Fichier source", "Incident"]
+    widths = [12, 30, 36, 9, 10, 11, 13, 44, 60, 30]
     for j, h in enumerate(heads, start=1):
         c = ws2.cell(row=1, column=j, value=h)
         c.font, c.fill = head_font, head_fill
-        ws2.column_dimensions[get_column_letter(j)].width = [12, 30, 36, 9, 10, 9, 44, 60, 30][j - 1]
+        ws2.column_dimensions[get_column_letter(j)].width = widths[j - 1]
     ws2.freeze_panes = "A2"
     for i, f in enumerate(campaign.files, start=2):
         cahier = (f"cahiers/{registry.safe_name(f.lft)}_cahier.pdf"
                   if f.treated else "")
         for j, v in enumerate([f.groupe, f.machine, f.lft, len(f.rows), f.treated,
-                               f.excluded, cahier, f.source, f.incident], start=1):
+                               f.cut_only, f.excluded, cahier, f.source,
+                               f.incident], start=1):
             c = ws2.cell(row=i, column=j, value=v if v != "" else None)
-            if j == 7 and cahier:
+            if j == 8 and cahier:
                 c.hyperlink, c.font = cahier, link_font
-    ws2.auto_filter.ref = f"A1:I{max(ws2.max_row, 1)}"
+    ws2.auto_filter.ref = f"A1:J{max(ws2.max_row, 1)}"
 
     # --- feuille Campagne
     ws3 = wb.create_sheet("Campagne")
@@ -722,9 +851,12 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
         ("Fichiers en erreur", s["fichiers_en_erreur"]),
         ("Pièces rencontrées", s["pieces"]), ("Pièces cintrées", s["traitees"]),
         ("Tubes droits", s["tubes_droits"]),
-        ("Pièces hors périmètre", s["exclues"]),
-        ("Plans PDF", s["plans"]), ("Modèles 3D", s["modeles_3d"]),
-        ("", ""), ("Motifs d'exclusion", ""),
+        ("Fiches de débit", s["debits"]),
+        ("Pièces sans livrable", s["exclues"]),
+        ("Plans PDF", s["plans"]), ("Fiches de débit PDF", s["fiches_debit"]),
+        ("Modèles 3D", s["modeles_3d"]),
+        ("Modèles 3D refusés", s["sans_3d"]),
+        ("", ""), ("Motifs relevés", ""),
     ]
     for i, (k, v) in enumerate(rows, start=1):
         ws3.cell(row=i, column=1, value=k).font = Font(bold=not v or k.startswith("Campagne"))

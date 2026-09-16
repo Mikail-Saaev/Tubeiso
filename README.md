@@ -14,9 +14,9 @@ une **ligne de commande** dont la commande `batch` traite des milliers de LFT
 d'un coup, et une **bibliothèque Python**. Voir `DEMARRAGE.md`.
 
 ```
-LFT.xlsx ──lecteur──▶ lots + tubes ──filtre périmètre──▶ tubes avec PROGCRIPPA
+LFT.xlsx ──lecteur──▶ lots + tubes ──▶ scope.py ──▶ cintrée · droite · débit
                                           │
-                                   hors périmètre : motif tracé, aucun fichier
+                              forme non définie : fiche de débit, pas de plan
                                           │
                           parseur ──▶ LRA brut ──convention BSA──▶ LRA géométrique
                                                               │
@@ -313,49 +313,70 @@ Le deuxième triplet du code n'est pas décoratif : `750 421 012` est un Forflex
 du catalogue est quand même classé par son préfixe — c'est la **nature** qui
 décide du sort de la pièce, et elle se lit sur trois chiffres.
 
-Les Ø22 à Ø38 existent en Ermeto mais BSA ne les cintre plus : ils sont donc
-rigides et hors périmètre, ce que l'application distingue explicitement d'un
-tuyau souple.
+Les Ø22 à Ø38 existent en Ermeto mais BSA ne les cintre plus. Ils restent
+parfaitement modélisables : on ne les plie pas, on les coupe droit.
 
 ## Le périmètre
 
-Trois sorts possibles, et c'est `scope.py` qui tranche avant tout calcul :
+**Une pièce n'est écartée que lorsqu'il n'y a rien à mettre sur le papier.**
+C'est la seule règle, et c'est `scope.py` qui tranche avant tout calcul :
 
 | Statut | Ce que c'est | Ce qui est produit |
 |---|---|---|
-| **traitée** | programme Crippa complet | plan coté + modèle 3D |
-| **tube droit** | rigide, pas de programme, longueur et Ø connus | plan de débit + modèle 3D |
-| **exclue** | tout le reste | rien, et le motif est tracé |
+| **traitée** | programme Crippa exploitable | plan coté + modèle 3D |
+| **tube droit** | pas de coude, mais Ø et longueur connus | plan de débit + modèle 3D |
+| **débit seul** | forme non définie : souple, façonné à la main | fiche de débit |
+| **exclue** | ni longueur, ni matière identifiable | rien, et le motif est tracé |
 
 Le tube droit suit la consigne BSA : « même s'il n'y a pas de programme, il
 faut générer la 3D avec uniquement la longueur et le diamètre. » Il n'y a
 aucune géométrie à deviner — une droite et un diamètre suffisent — donc il est
 traité, et son plan porte la mention **TUBE DROIT — AUCUN CINTRAGE**, avec un
 bloc cintrage qui dit « sans objet » plutôt qu'un rayon de matrice qui
-induirait en erreur.
+induirait en erreur. L'absence de matrice de cintrage n'y change rien : un
+Ermeto Ø28 coupé droit se modélise en un cylindre creux, vérifié étanche.
 
-Une pièce vraiment sans géométrie, elle, ne produit rien : en fabriquer une
-quand même reviendrait à livrer un modèle inventé, plus dangereux qu'un modèle
-absent. Chaque exclusion porte un motif stable :
+Une pièce dont la **forme** n'est pas calculable — un tuyau souple, une pièce
+façonnée à la main — ne reçoit jamais de plan : en inventer un reviendrait à
+livrer une géométrie fausse, plus dangereuse qu'une géométrie absente. Mais sa
+matière, sa longueur et sa quantité servent à l'approvisionnement, donc elle
+sort une **fiche de débit** : une page, sans aucune cote, barrée d'un bandeau
+*CE N'EST PAS UN PLAN DE FABRICATION*, rangée dans `debits/` et non dans
+`plans/`.
 
-| Motif | Ce qu'il signifie |
-|---|---|
-| `matière_souple` | tuyau souple : ni cintré, ni modélisable |
-| `tube_droit_sans_programme` | case DROIT cochée, aucun programme |
-| `plié_à_la_main` | case FAITMAIN : façonné hors Crippa |
-| `sans_programme` | colonne PROGCRIPPA vide |
-| `programme_tronqué` | pas de M30 : géométrie fausse mais plausible |
-| `hors_outillage_crippa` | diamètre rigide sans matrice BSA |
-| `diamètre_introuvable` | ni dans le programme, ni dans CODE_MAT |
-| `longueur_absente` | tube droit sans LONGUEUR : rien à modéliser |
+| Motif | Statut | Ce qu'il signifie |
+|---|---|---|
+| `tube_droit_sans_programme` | tube droit | ni coude ni programme : longueur et Ø suffisent |
+| `programme_sans_cintrage` | tube droit | un programme, mais aucun bloc de pliage |
+| `programme_tronqué` | traitée | pas de M30 : contrôle de longueur renforcé |
+| `matière_souple` | débit seul | tuyau souple : forme non définie |
+| `plié_à_la_main` | débit seul | case FAITMAIN : façonné hors Crippa |
+| `hors_outillage_crippa` | débit seul | des coudes, mais aucune matrice BSA à ce Ø |
+| `diamètre_introuvable` | débit seul | ni dans le programme, ni dans CODE_MAT |
+| `matière_inconnue` | exclue | code matière absent ou illisible |
+| `longueur_absente` | exclue | ni longueur ni programme : rien à produire |
 
-Rien n'est perdu pour autant : les pièces exclues figurent dans l'index, dans
-le récapitulatif du lot et sur la couverture du cahier, avec leur motif. Une
+### Le modèle 3D peut être refusé alors que le plan est écrit
+
+Un programme tronqué n'est plus rejeté en bloc : la troncature ne mange pas
+toujours de la géométrie. Il est traité, et c'est le **contrôle de longueur**
+qui tranche. Si le développé recalculé colle au R6, la troncature n'a coûté que
+la fin de ligne — une alerte suffit. S'il s'en écarte, le plan porte le bandeau
+rouge **ERREUR** avec le métrage manquant, et **aucun STEP n'est écrit** : un
+solide faux part chez un sous-traitant sans que personne ne relise le plan.
+Sur le lot d'essai, trois programmes tronqués sur quatre perdaient réellement
+de la matière (−108, −257 et −59 mm) ; le quatrième ne perdait que son `M30`
+(−1,8 mm) et garde son modèle.
+
+Rien n'est perdu : toutes les pièces figurent dans l'index, dans le
+récapitulatif du lot et sur la couverture du cahier, avec leur motif. Une
 campagne rend compte de **100 % des lignes lues**.
 
-Dans l'application, chaque pièce porte une pastille `rigide` ou `souple`, les
-pièces hors périmètre sont estompées, et l'onglet *Cotations* ouvre sur un bloc
-**Matière** qui donne la famille, le code BSA, la paroi et le motif éventuel.
+Dans l'application, chaque pièce porte une pastille `rigide` ou `souple`, une
+pastille pleine pour les pièces mises en plan, un **anneau orange** pour celles
+en fiche de débit, un point gris pour celles sans livrable. L'onglet
+*Cotations* ouvre sur un bloc **Matière** qui donne la famille, le code BSA, la
+paroi, le livrable attendu et le motif éventuel.
 
 ## La campagne : des milliers de LFT
 
@@ -372,11 +393,16 @@ bibliotheque/
   rapport.csv       le même contenu en texte
   journal.txt       ce qui s'est passé, fichier par fichier
   plans/            BCH_PLATINE_82_0889_0877-0000-CL_223.pdf
+  debits/           BCH_PLATINE_82_0889_0877-0000-CL_2.pdf     forme non définie
   step/             BCH_PLATINE_82_0889_0877-0000-CL_223.stp
   donnees/          BCH_PLATINE_82_0889_0877-0000-CL_223.json
   cahiers/          BCH_PLATINE_82_0889_0877-0000-CL_cahier.pdf
   stl/ brep/ dxf/   seulement si ces formats sont demandés
 ```
+
+`debits/` est séparé de `plans/` à dessein : une fiche de débit et un plan de
+fabrication ne se rangent pas au même endroit, sinon ils finissent par se
+confondre dans le dossier envoyé au sous-traitant.
 
 **Un dossier par type, et rien d'imbriqué.** Une arborescence
 `groupe/machine/LFT/plans/` obligeait à descendre quatre niveaux pour ouvrir un
@@ -439,7 +465,7 @@ quelle proportion du parc a une PROGCRIPPA exploitable.
 |---|---|
 | `model.py` | Modèle pivot : `Tooling`, `Bend`, `TubeProgram` |
 | `materials.py` | Catalogue matière BSA : familles, rigide / souple, cintrable |
-| `scope.py` | Périmètre : qui est traité, qui est exclu et pourquoi |
+| `scope.py` | Périmètre : quel livrable chaque pièce produit, et pourquoi |
 | `parsers/crippa.py` | Lecture syntaxique du dialecte Crippa, sans interprétation |
 | `lft.py` | Lecture du LFT : en-tête, regroupement multi-lignes, lots |
 | `bsa.py` | Constantes machine, modèle de longueur et retour élastique |

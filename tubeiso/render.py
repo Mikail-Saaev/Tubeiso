@@ -22,13 +22,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 
-from . import bsa, materials, sheet as sh
+from . import bsa, materials, scope, sheet as sh
 from .geometry import Centerline
 from .model import Tooling, TubeProgram
-from .validate import ERROR, WARN, Issue
+from .validate import ERROR, WARN, Issue, unsafe
 
 COS30, SIN30 = math.cos(math.radians(30)), math.sin(math.radians(30))
 
@@ -295,10 +296,11 @@ def _draw_curve(s: sh.Sheet, lay: Layout, cl: Centerline, diameter: float,
     return pts
 
 
-def _draw_iso(s: sh.Sheet, d: PlanData, azimuth: float | None) -> Layout:
+def _draw_iso(s: sh.Sheet, d: PlanData, azimuth: float | None,
+              shift: float = 0.0) -> Layout:
     cl, tube = d.centerline, d.tube
-    box = ISO_BOX if d.status != "ERREUR" else (
-        ISO_BOX[0], ISO_BOX[1] + 8.0, ISO_BOX[2], ISO_BOX[3])
+    box = ISO_BOX if shift <= 0 else (
+        ISO_BOX[0], ISO_BOX[1] + shift, ISO_BOX[2], ISO_BOX[3])
     lay = layout(cl, box, d.diameter or 6.0, azimuth)
     x0, y0, x1, y1 = box
     s.rect(x0, y0, x1, y1, w=sh.W_THIN, colour=sh.LIGHT)
@@ -747,23 +749,48 @@ def _draw_page2(s: sh.Sheet, d: PlanData, pages: int) -> None:
 
 # --------------------------------------------------------------------- assemblage
 
-def _warn_banner(s: sh.Sheet, d: PlanData) -> None:
+def _banner_lines(s: sh.Sheet, d: PlanData) -> list[str]:
+    """Texte du bandeau d'erreur, deja decoupe en lignes. Vide s'il n'y en a pas.
+
+    Le message entier doit tenir : le tronquer laissait le lecteur devant
+    « 108 mm de matière manquante (156.2 … », c'est-a-dire devant rien.
+    """
+    if d.status != "ERREUR":
+        return []
+    x0, x1 = ISO_BOX[0], ISO_BOX[2]
+    lignes = sh.wrap(s, "CONTRÔLE EN ERREUR — VÉRIFIER AVANT FABRICATION : "
+                        + _first_error(d), (x1 - x0) - 6, 2.5, bold=True,
+                     limit=2)
+    if unsafe(d.issues):
+        # Le plan part seul chez le sous-traitant : il doit dire lui-meme
+        # qu'aucun solide ne l'accompagne, et pourquoi.
+        lignes.append("AUCUN MODÈLE 3D N'A ÉTÉ PRODUIT : la forme ci-dessous "
+                      "est reconstruite à partir d'un programme incomplet.")
+    return lignes
+
+
+def _warn_banner(s: sh.Sheet, d: PlanData) -> float:
     """Bandeau d'avertissement sur une piece dont un controle est en erreur.
+
+    Retourne la hauteur dont la vue doit descendre pour ne pas le recouvrir.
 
     Le cartouche porte deja la mention, mais un cartouche se lit apres coup. Un
     plan faux qui part en fabrication coute une serie entiere : il faut que le
     doute saute aux yeux avant meme d'avoir lu la piece.
     """
-    if d.status != "ERREUR":
-        return
+    lignes = _banner_lines(s, d)
+    if not lignes:
+        return 0.0
     x0, x1 = ISO_BOX[0], ISO_BOX[2]
     y = ISO_BOX[1] + 4.2
-    s.rect(x0, y - 5.4, x1, y + 2.4, w=sh.W_THIN, colour=sh.RED, fill="#FAE9E7")
-    tete = "CONTRÔLE EN ERREUR — VÉRIFIER AVANT FABRICATION : "
-    reste = sh.ellipsis(s, _first_error(d),
-                        (x1 - x0) - 6 - s.width_of(tete, 2.5, True), 2.5, True)
-    s.text((x0 + x1) / 2, y, tete + reste, 2.5, anchor="middle", bold=True,
-           colour=sh.RED)
+    haut = y - 5.4
+    bas = y + 2.4 + 3.6 * (len(lignes) - 1)
+    s.rect(x0, haut, x1, bas, w=sh.W_THIN, colour=sh.RED, fill="#FAE9E7")
+    for i, line in enumerate(lignes):
+        s.text((x0 + x1) / 2, y + 3.6 * i,
+               sh.ellipsis(s, line, (x1 - x0) - 6, 2.5, True),
+               2.5, anchor="middle", bold=True, colour=sh.RED)
+    return bas - ISO_BOX[1] + 2.0
 
 
 def _first_error(d: PlanData) -> str:
@@ -777,14 +804,199 @@ def draw(s: sh.Sheet, d: PlanData, azimuth: float | None = None,
          pages: int = 2) -> None:
     """Dessine la feuille complete sur la surface fournie."""
     _frame(s, d, 1, pages)
-    _warn_banner(s, d)
-    lay = _draw_iso(s, d, azimuth)
+    shift = _warn_banner(s, d)
+    lay = _draw_iso(s, d, azimuth, shift)
     _draw_ortho(s, d)
     _draw_data_column(s, d)
     _draw_title_block(s, d, lay, 1, pages)
     if pages >= 2:
         s.page_break()
         _draw_page2(s, d, pages)
+
+
+
+# ---------------------------------------------------------------- fiche de debit
+
+# Ce qu'il reste a faire, une fois la matiere commandee. La phrase depend du
+# motif : dire « façonner selon le gabarit » d'un tuyau souple qu'on coupe et
+# qu'on monte tel quel enverrait un sous-traitant chercher un gabarit inexistant.
+CONSIGNE_DEBIT = {
+    scope.MATIERE_SOUPLE:
+        "Tuyau souple : il se coupe à la longueur indiquée et se monte sans "
+        "mise en forme. Les embouts sont sertis selon la nomenclature de la "
+        "machine.",
+    scope.FAIT_MAIN:
+        "Pièce façonnée à la main : la forme se relève sur le gabarit ou sur "
+        "la pièce d'origine. Cette fiche ne remplace ni l'un ni l'autre, elle "
+        "ne sert qu'à commander la matière.",
+    scope.HORS_OUTILLAGE:
+        "Ce diamètre n'a pas de matrice de cintrage chez BSA : la forme n'a "
+        "pas pu être calculée. Se reporter au programme machine ou au plan "
+        "d'origine avant toute mise en forme.",
+    scope.DIAMETRE_INCONNU:
+        "Le diamètre n'a pu être lu ni dans le programme, ni dans le code "
+        "matière : la forme n'a pas pu être calculée. Vérifier CODE_MAT dans "
+        "la LFT avant de commander.",
+    "": "La forme de cette pièce n'a pas pu être établie à partir de la LFT. "
+        "Se reporter au gabarit, au schéma ou au programme d'origine.",
+}
+
+
+def _debit_page(s: sh.Sheet, d: PlanData, motif: str, detail: str) -> None:
+    """Une page, sans geometrie, pour une piece dont la forme n'est pas definie.
+
+    Un tuyau souple ou un tube façonne a la main n'a pas de forme calculable.
+    Sa matiere, sa longueur et sa quantite restent utiles a l'approvisionnement
+    — mais le document doit dire, sans ambiguite possible, que ce n'est pas un
+    plan de fabrication. D'ou le bandeau, et l'absence de toute vue.
+
+    Le reste de la page ne reste pas vide pour autant : tout ce que la LFT sait
+    de la piece y figure. C'est precisement ce qui permet a quelqu'un de
+    retrouver la forme ailleurs — gabarit, dessin, remarque d'atelier.
+    """
+    x0, y0, x1, y1 = FRAME
+    s.rect(*FRAME, w=sh.W_FRAME, colour=sh.INK)
+    s.text(x0, y0 - 2.2, f"{d.groupe or '—'} · {d.machine or '—'} · LFT "
+           f"{d.lft or '—'} · repère {d.name}", 2.2, colour=sh.GREY)
+    s.text(x1, y0 - 2.2, "page 1/1", 2.2, anchor="end", colour=sh.GREY)
+
+    # --- bandeau : il occupe toute la largeur, on ne peut pas le manquer
+    by = y0 + 16.0
+    s.rect(x0 + 2, y0 + 2, x1 - 2, by, w=sh.W_THIN, colour=sh.ORANGE,
+           fill="#FBF2E0")
+    s.text((x0 + x1) / 2, y0 + 8.4, "FICHE DE DÉBIT — CE N'EST PAS UN PLAN DE "
+           "FABRICATION", 4.4, anchor="middle", bold=True, colour=sh.ORANGE)
+    s.text((x0 + x1) / 2, y0 + 13.4,
+           "La forme de cette pièce n'est pas définie : aucune cote, aucun "
+           "angle, aucun modèle 3D.", 2.5, anchor="middle", colour=sh.GREY)
+
+    lx0, lx1 = x0 + 4, 148.0            # colonne gauche
+    rx0, rx1 = 152.0, x1 - 4            # colonne droite
+    top1 = by + 5.0
+    h1 = 56.0
+
+    # --- identite, a gauche
+    y = _block(s, (lx0, top1, lx1, top1 + h1), "Identification")
+    for k, v in (("Repère", d.name),
+                 ("Programme", d.tube.program_number or "—"),
+                 ("Liste / lot", d.tube.list_number or "—"),
+                 ("LFT", d.lft or "—"),
+                 ("Groupe", d.groupe or "—"),
+                 ("Machine", d.machine or "—"),
+                 ("Désignation", d.designation or "—")):
+        s.label_value(lx0 + 2.5, lx1 - 2.5, y, k,
+                      sh.ellipsis(s, v, lx1 - lx0 - 30, 2.4, True), 2.4)
+        y += 6.9
+
+    # --- matiere et debit, a droite
+    y = _block(s, (rx0, top1, rx1, top1 + h1), "Matière et débit")
+    mat = d.material
+    longueur = d.lft_length or d.tube.declared_length
+    total = (longueur or 0) * (d.quantite or 1)
+    for k, v in (("Désignation", mat.designation if mat else "—"),
+                 ("Code BSA", mat.code if mat else "—"),
+                 ("Nature", (mat.kind if mat else "inconnue").upper()),
+                 ("Ø extérieur", f"{d.diameter:g} mm" if d.diameter else "—"),
+                 ("Ø intérieur", f"{mat.bore:g} mm" if mat and mat.bore else "—"),
+                 ("Longueur à débiter",
+                  f"{longueur:.0f} mm" if longueur else "—"),
+                 ("Quantité · métrage total",
+                  f"{d.quantite:g} × {longueur:.0f} = {total:.0f} mm"
+                  if d.quantite and longueur else
+                  (f"{d.quantite:g}" if d.quantite else "—"))):
+        s.label_value(rx0 + 2.5, rx1 - 2.5, y, k,
+                      sh.ellipsis(s, v, rx1 - rx0 - 34, 2.4, True), 2.4)
+        y += 6.9
+
+    # --- extremites : sur un tuyau serti, elles conditionnent la coupe
+    top2 = top1 + h1 + 4.0
+    h2 = 44.0
+    y = _block(s, (lx0, top2, lx1, top2 + h2), "Extrémités")
+    lab1, dep1 = fitting_label(d.embout_1, d.diameter)
+    lab2, dep2 = fitting_label(d.embout_2, d.diameter)
+    for k, v, extra in (("Départ", f"{d.embout_1} · {lab1}" if d.embout_1 else "—", dep1),
+                        ("Arrivée", f"{d.embout_2} · {lab2}" if d.embout_2 else "—", dep2)):
+        s.label_value(lx0 + 2.5, lx1 - 2.5, y, k,
+                      sh.ellipsis(s, v, lx1 - lx0 - 24, 2.4, True), 2.4)
+        y += 5.2
+        if extra:
+            s.text(lx0 + 2.5, y, sh.ellipsis(s, extra, lx1 - lx0 - 8, 2.2),
+                   2.2, colour=sh.GREY)
+            y += 4.6
+        else:
+            y += 1.4
+    if d.recut:
+        s.label_value(lx0 + 2.5, lx1 - 2.5, y, "Recoupe", d.recut_label, 2.4)
+        y += 6.0
+    for line in sh.wrap(s, "La longueur ci-dessus est celle du tuyau nu. Les "
+                           "embouts sont montés selon la nomenclature de la "
+                           "machine, qui fait foi.", lx1 - lx0 - 8, 2.2, limit=3):
+        s.text(lx0 + 2.5, y, line, 2.2, colour=sh.GREY)
+        y += 3.3
+
+    # --- ce que la LFT sait encore : c'est par la qu'on retrouve la forme
+    y = _block(s, (rx0, top2, rx1, top2 + h2), "Autres données de la LFT")
+    for k, v in (("Gabarit", d.gabarit or "—"),
+                 ("Dessin", d.dessin or "—"),
+                 ("Vitesse", d.vitesse or "—"),
+                 ("Fichier source", Path(d.source_file).name if d.source_file else "—")):
+        s.label_value(rx0 + 2.5, rx1 - 2.5, y, k,
+                      sh.ellipsis(s, v, rx1 - rx0 - 26, 2.4, True), 2.4)
+        y += 6.4
+    if d.remarque:
+        s.text(rx0 + 2.5, y, "REMARQUE", 2.2, bold=True, colour=sh.BLUE)
+        y += 4.0
+        for line in sh.wrap(s, d.remarque, rx1 - rx0 - 8, 2.3, limit=3):
+            s.text(rx0 + 2.5, y, line, 2.3)
+            y += 3.4
+
+    # --- motif, sur toute la largeur
+    top3 = top2 + h2 + 4.0
+    h3 = y1 - 8.0 - top3
+    y = _block(s, (lx0, top3, rx1, top3 + h3),
+               "Pourquoi cette pièce n'a pas de plan")
+    s.text(lx0 + 2.5, y, motif, 2.8, bold=True, colour=sh.ORANGE)
+    y += 5.2
+    for line in sh.wrap(s, detail, rx1 - lx0 - 10, 2.5, limit=2):
+        s.text(lx0 + 2.5, y, line, 2.5)
+        y += 3.8
+    y += 2.0
+    for line in sh.wrap(s, CONSIGNE_DEBIT.get(motif, CONSIGNE_DEBIT[""]),
+                        rx1 - lx0 - 10, 2.4, limit=3):
+        s.text(lx0 + 2.5, y, line, 2.4, colour=sh.GREY)
+        y += 3.6
+    y += 2.0
+    for line in sh.wrap(
+            s, "Cette fiche ne sert qu'à commander la matière et à préparer le "
+               "débit. Elle ne décrit ni la forme, ni les cotes, ni le montage : "
+               "aucun contrôle de conformité ne peut s'appuyer dessus.",
+            rx1 - lx0 - 10, 2.3, limit=3):
+        s.text(lx0 + 2.5, y, line, 2.3, colour=sh.GREY)
+        y += 3.4
+
+    s.text(x0 + 4, y1 - 4,
+           f"Établi le {d.drawn_on} par tubeiso — d'après {Path(d.source_file).name}"
+           if d.source_file else f"Établi le {d.drawn_on} par tubeiso",
+           2.2, colour=sh.GREY)
+
+
+def debit_sheet(data: PlanData, path, motif: str = "", detail: str = ""):
+    """Ecrit la fiche de debit d'une piece sans forme definie."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    s = sh.PdfSheet(p, PAGE_W, PAGE_H,
+                    title=f"Débit {data.name} — {data.lft or ''}".strip(),
+                    subject="Fiche de débit — forme non définie")
+    _debit_page(s, data, motif or "forme non définie", detail or "")
+    s.page_break()
+    s.save()
+    return p
+
+
+def debit_svg(data: PlanData, motif: str = "", detail: str = "") -> str:
+    s = sh.SvgSheet(PAGE_W, PAGE_H)
+    _debit_page(s, data, motif or "forme non définie", detail or "")
+    return s.to_svg(0)
 
 
 def to_svg(data: PlanData, azimuth: float | None = None) -> str:
@@ -802,8 +1014,6 @@ def to_svg_pages(data: PlanData, azimuth: float | None = None) -> list[str]:
 
 def to_pdf(data: PlanData, path, azimuth: float | None = None):
     """Ecrit le plan complet en PDF. Retourne le chemin."""
-    from pathlib import Path
-
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     s = sh.PdfSheet(p, PAGE_W, PAGE_H,
@@ -818,8 +1028,6 @@ def to_pdf(data: PlanData, path, azimuth: float | None = None):
 def booklet(items: list[PlanData], path, lot_label: str = "",
             excluded: list[dict] | None = None):
     """Cahier d'atelier : une couverture puis deux pages par tube."""
-    from pathlib import Path
-
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     s = sh.PdfSheet(p, PAGE_W, PAGE_H, title=f"Cahier LFT {lot_label}",
@@ -833,51 +1041,111 @@ def booklet(items: list[PlanData], path, lot_label: str = "",
     return p
 
 
+COVER_COLS = [24, 34, 46, 12, 24, 16, 18, 24]
+COVER_ALIGNS = ["start", "start", "start", "end", "end", "end", "end", "start"]
+COVER_HEAD = ["Repère", "Programme", "Matière", "Ø", "Développé", "Coudes",
+              "Recoupe", "Contrôle"]
+COVER_ROW_H = 4.6
+COVER_BOTTOM = 194.0          # au-dela, on deborde du cadre
+
+
 def _cover(s: sh.Sheet, items: list[PlanData], lot_label: str,
            excluded: list[dict]) -> None:
-    s.rect(*FRAME, w=sh.W_FRAME, colour=sh.INK)
-    first = items[0] if items else None
-    s.text(FRAME[0] + 4, 26, "CAHIER DE FABRICATION", 7.0, bold=True)
-    s.text(FRAME[0] + 4, 34, f"LFT {lot_label}", 4.0, colour=sh.BLUE)
-    if first:
-        s.text(FRAME[0] + 4, 41,
-               f"{first.groupe or '—'} · {first.machine or '—'}"
-               + (f" · {first.designation}" if first.designation else ""),
-               2.8, colour=sh.GREY)
-    s.hline(FRAME[0] + 4, FRAME[2] - 4, 46, w=sh.W_THIN, colour=sh.LIGHT)
+    """Couverture du cahier : le sommaire du lot, puis ce qui n'a pas de plan.
 
-    rows = [["Repère", "Programme", "Matière", "Ø", "Développé", "Coudes",
-             "Recoupe", "Contrôle"]]
+    Le sommaire est PAGINE. Un lot de soixante-dix pieces tenait autrefois sur
+    une seule page : les dernieres lignes sortaient du cadre, et le bloc des
+    pieces sans plan n'etait jamais imprime.
+    """
+    # Une piece qui a une fiche de debit n'est pas une exclusion : le cahier
+    # doit dire ou elle est passee, sinon on la cherche dans plans/.
+    fiches = [e for e in excluded if e.get("fiche")]
+    manquantes = [e for e in excluded if not e.get("fiche")]
+
+    def page_footer() -> None:
+        s.text(FRAME[0] + 4, FRAME[3] - 4,
+               f"{len(items)} plan(s) · {len(fiches)} fiche(s) de débit · "
+               f"{len(manquantes)} sans livrable · "
+               f"établi le {date.today().strftime('%d.%m.%Y')} par tubeiso",
+               2.2, colour=sh.GREY)
+
+    def new_page(suite: bool) -> float:
+        """Ouvre une page de couverture. Retourne l'ordonnee de depart."""
+        s.rect(*FRAME, w=sh.W_FRAME, colour=sh.INK)
+        if suite:
+            s.text(FRAME[0] + 4, 18, f"CAHIER DE FABRICATION — LFT {lot_label}"
+                   " (suite)", 3.4, bold=True)
+            s.hline(FRAME[0] + 4, FRAME[2] - 4, 22, w=sh.W_THIN, colour=sh.LIGHT)
+            return 28.0
+        first = items[0] if items else None
+        s.text(FRAME[0] + 4, 26, "CAHIER DE FABRICATION", 7.0, bold=True)
+        s.text(FRAME[0] + 4, 34, f"LFT {lot_label}", 4.0, colour=sh.BLUE)
+        if first:
+            s.text(FRAME[0] + 4, 41,
+                   f"{first.groupe or '—'} · {first.machine or '—'}"
+                   + (f" · {first.designation}" if first.designation else ""),
+                   2.8, colour=sh.GREY)
+        s.hline(FRAME[0] + 4, FRAME[2] - 4, 46, w=sh.W_THIN, colour=sh.LIGHT)
+        return 54.0
+
+    y = new_page(False)
+    lignes = [COVER_HEAD]
     for d in items:
-        rows.append([
+        lignes.append([
             d.name, d.tube.program_number or "—",
             sh.ellipsis(s, d.material.designation if d.material else "—", 42, 2.3),
             f"{d.diameter:g}",
             f"{d.tube.declared_length or d.centerline.developed:.0f}",
             str(d.tube.n_bends), f"{d.recut:g}" if d.recut else "—", d.status,
         ])
-    y = s.table(FRAME[0] + 4, 54, [26, 34, 48, 12, 24, 16, 18, 24], rows,
-                size=2.4, row_h=4.6,
-                aligns=["start", "start", "start", "end", "end", "end", "end", "start"])
+
+    corps = lignes[1:]
+    while corps:
+        tiennent = max(1, int((COVER_BOTTOM - y - 6) / COVER_ROW_H))
+        y = s.table(FRAME[0] + 4, y, COVER_COLS, [COVER_HEAD] + corps[:tiennent],
+                    size=2.4, row_h=COVER_ROW_H, aligns=COVER_ALIGNS)
+        corps = corps[tiennent:]
+        if corps:
+            page_footer()
+            s.page_break()
+            y = new_page(True)
 
     if excluded:
-        y = max(y + 6, 150)
-        s.text(FRAME[0] + 4, y, "PIÈCES HORS PÉRIMÈTRE", 3.0, bold=True, colour=sh.ORANGE)
-        y += 5.5
+        besoin = 18 + COVER_ROW_H * (min(len(excluded), 16) + 1)
+        if y + besoin > COVER_BOTTOM:
+            page_footer()
+            s.page_break()
+            y = new_page(True)
+        else:
+            y = max(y + 6, y)
         s.text(FRAME[0] + 4, y,
-               "Ces lignes de la LFT n'ont pas de plan : aucune PROGCRIPPA exploitable, "
-               "ou matière non cintrable.", 2.2, colour=sh.GREY)
-        y += 5.0
-        ex = [["Repère", "Motif", "Détail"]]
-        for e in excluded[:18]:
-            ex.append([str(e.get("repere", "")), str(e.get("motif", "")),
-                       sh.ellipsis(s, str(e.get("detail", "")), 150, 2.2)])
-        s.table(FRAME[0] + 4, y, [26, 50, 160], ex, size=2.2, row_h=4.0)
+               "PIÈCES SANS PLAN DE CINTRAGE" if fiches else "PIÈCES SANS LIVRABLE",
+               3.0, bold=True, colour=sh.ORANGE)
+        y += 5.5
+        legende = []
+        if fiches:
+            legende.append(f"{len(fiches)} pièce(s) sortent en fiche de débit "
+                           "(dossier debits/) : leur forme n'est pas définie, "
+                           "seuls la matière et le débit sont fournis.")
+        if manquantes:
+            legende.append(f"{len(manquantes)} ligne(s) ne produisent rien.")
+        for line in sh.wrap(s, " ".join(legende), FRAME[2] - FRAME[0] - 10,
+                            2.2, limit=2):
+            s.text(FRAME[0] + 4, y, line, 2.2, colour=sh.GREY)
+            y += 3.3
+        y += 2.0
+        ex = [["Repère", "Sortie", "Motif", "Détail"]]
+        for e in excluded[:16]:
+            ex.append([str(e.get("repere", "")),
+                       "fiche de débit" if e.get("fiche") else "rien",
+                       str(e.get("motif", "")),
+                       sh.ellipsis(s, str(e.get("detail", "")), 120, 2.2)])
+        y = s.table(FRAME[0] + 4, y, [24, 34, 48, 130], ex, size=2.2, row_h=4.0)
+        if len(excluded) > 16:
+            s.text(FRAME[0] + 4, y + 1, f"… et {len(excluded) - 16} autre(s) — "
+                   "la liste complète est dans INDEX.xlsx.", 2.2, colour=sh.GREY)
 
-    s.text(FRAME[0] + 4, FRAME[3] - 4,
-           f"{len(items)} plan(s) · {len(excluded)} exclusion(s) · "
-           f"établi le {date.today().strftime('%d.%m.%Y')} par tubeiso",
-           2.2, colour=sh.GREY)
+    page_footer()
 
 
 # --------------------------------------------------------------------------- DXF
@@ -904,4 +1172,5 @@ def to_dxf(tube: TubeProgram, cl: Centerline, path: str) -> None:
 
 __all__ = ["PlanData", "Layout", "layout", "project", "project_ortho",
            "best_azimuth", "draw", "to_svg", "to_svg_pages", "to_pdf",
-           "booklet", "to_dxf", "fitting_label", "straight_spans", "NOTES"]
+           "booklet", "debit_sheet", "debit_svg", "to_dxf", "fitting_label",
+           "straight_spans", "NOTES"]

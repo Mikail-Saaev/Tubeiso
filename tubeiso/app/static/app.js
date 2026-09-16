@@ -496,9 +496,11 @@ function renderDims(d) {
       <dt>Code BSA</dt><dd>${esc(m.code_matiere) || '—'}</dd>
       <dt>Famille</dt><dd>${esc(m.famille) || '—'}</dd>
       <dt>Épaisseur paroi</dt><dd>${m.paroi != null ? m.paroi + ' mm' : '—'}</dd>
-      <dt>Périmètre</dt><dd>${m.statut === 'exclue'
-          ? `<b class="bad">exclue</b> — ${esc(m.motif)} : ${esc(m.detail)}`
-          : '<b class="good">traitée</b> — plan et 3D générés'}</dd>
+      <dt>Livrable</dt><dd>${d.no_3d
+          ? `<b class="warn-txt">plan seul</b> — ${esc(d.no_3d)} : la géométrie
+             n'est pas fiable, aucun modèle 3D n'est écrit`
+          : `<b class="good">${esc(m.livrable || 'plan coté + modèle 3D')}</b>`}</dd>
+      ${m.motif ? `<dt>Signalé</dt><dd>${esc(m.motif)} : ${esc(m.detail)}</dd>` : ''}
     </dl>
 
     <h3 class="sec">Cotations du tube fini</h3>
@@ -626,19 +628,23 @@ function renderList() {
       <header class="lot-head"><span class="lot-no">${esc(lot.label)}</span>
         <span class="chip">${items.length}</span></header>
       <ul>${items.map((t) => {
-        const out = t.scope === 'exclue';
-        // Une pièce hors périmètre ne produit ni plan ni 3D : elle reste
-        // visible, mais son motif doit se lire sans clic.
-        const dot = out ? 'out'
+        const nul = t.scope === 'exclue';          // aucun fichier produit
+        const deb = !!t.cut_only;                  // fiche de débit seulement
+        const out = nul || deb;                    // pas de géométrie
+        // Une pièce sans géométrie reste visible, mais son motif doit se lire
+        // sans clic : c'est lui qui dit quel livrable elle produira.
+        const dot = nul ? 'out' : deb ? 'debit'
                   : t.status === 'erreur' ? 'err'
                   : t.status === 'alerte' ? 'warn' : 'info';
         // « 0c » pour un tube droit n'apprend rien : on nomme ce qu'il est.
-        const meta = out ? esc(t.reason || 'hors périmètre')
+        const meta = out ? esc(t.reason || (deb ? 'débit seul' : 'sans livrable'))
                   : t.bends ? `Ø${t.diameter} · ${t.bends}c${t.rows > 1 ? ` · ${t.rows}L` : ''}`
                             : `Ø${t.diameter} · droit`;
+        const tip = `${t.matiere || ''}${t.reason_label ? ' — ' + t.reason_label : ''}`
+                  + `\n${t.livrable || ''}`;
         return `
-        <li data-uid="${t.uid}" class="${t.uid === S.uid ? 'on' : ''}${out ? ' out' : ''}"
-            title="${esc(t.matiere || '')}${t.reason_label ? ' — ' + esc(t.reason_label) : ''}">
+        <li data-uid="${t.uid}" class="${t.uid === S.uid ? 'on' : ''}${nul ? ' out' : ''}${deb ? ' debit' : ''}"
+            title="${esc(tip)}">
           <i class="dot ${dot}"></i>
           <span class="ref">${esc(t.ref)}</span>
           <span class="nat ${t.nature === 'souple' ? 'souple' : t.nature === 'rigide' ? 'rigide' : 'unk'}"
@@ -678,11 +684,27 @@ async function select(uid) {
       // en inventer une : la vue se vide et le panneau explique pourquoi.
       clearModel();
       S.detail = null;
+      // Les commandes de vue n'ont rien à commander : les masquer évite de
+      // laisser croire qu'un modèle existe quelque part.
+      $('#viewbar').hidden = true;
+      $('#nomodel').hidden = true;
       renderOutOfScope(d);
-      say(`${d.ref} — hors périmètre : ${d.reason_label || d.reason}`, 'err');
+      say(`${d.ref} — ${d.cut_only ? 'fiche de débit' : 'sans livrable'} : `
+          + `${d.reason_label || d.reason}`, d.cut_only ? '' : 'err');
       return;
     }
 
+    $('#viewbar').hidden = false;
+    // La vue montre une forme plausible même quand il manque des blocs au
+    // programme : le dire ici, sur la vue, et pas seulement dans un panneau.
+    const nm = $('#nomodel');
+    nm.hidden = !d.no_3d;
+    if (d.no_3d) {
+      nm.innerHTML = `GÉOMÉTRIE NON FIABLE — ${esc(d.no_3d)}`
+        + `<span>La forme ci-dessous est reconstruite à partir d'un programme `
+        + `incomplet. Le plan sera écrit avec son bandeau ERREUR ; aucun `
+        + `modèle 3D ne sera exporté.</span>`;
+    }
     showTube(d);
     renderDims(d);
     renderDiag(d);
@@ -702,18 +724,25 @@ async function select(uid) {
 }
 
 
-/* ───────────────────────────────────── pièces hors périmètre
+/* ───────────────────────────────────── pièces sans forme définie
 
-   Une pièce écartée n'a pas de géométrie. Lui en fabriquer une « pour avoir
+   Une pièce sans forme n'a pas de géométrie. Lui en fabriquer une « pour avoir
    quelque chose à montrer » est exactement ce qu'il ne faut pas faire : un
    tuyau souple de 5 m s'affichait en 3D avec un développé, ce qu'on pouvait
-   prendre pour une pièce réelle. */
+   prendre pour une pièce réelle.
+
+   Elle n'est pas écartée pour autant : sa matière, sa longueur et sa quantité
+   servent à commander, et sortent en fiche de débit. */
 function renderOutOfScope(d) {
   const m = d.matiere || {};
+  const deb = !!d.cut_only;
+  const titre = deb ? 'fiche de débit' : 'sans livrable';
   $('#hint').style.display = '';
-  $('#hint').innerHTML = `<b>${esc(d.ref)} — hors périmètre</b><br>`
+  $('#hint').innerHTML = `<b>${esc(d.ref)} — ${titre}</b><br>`
     + `${esc(d.reason_label || d.reason || '')}<br>`
-    + `<span class="muted">Aucun modèle n'est calculé pour cette pièce.</span>`;
+    + `<span class="muted">${deb
+        ? "Forme non définie : matière et longueur seulement, aucun modèle 3D."
+        : "Aucun modèle n'est calculé pour cette pièce."}</span>`;
 
   $('#tab-dims').innerHTML = `
     <h3 class="sec">Identification</h3>
@@ -721,7 +750,15 @@ function renderOutOfScope(d) {
       <dt>Repère</dt><dd>${esc(d.ref)}</dd>
       <dt>Programme</dt><dd>${esc(d.programme) || '—'}</dd>
       <dt>Liste / lot</dt><dd>${esc(d.liste) || '—'}</dd>
-      <dt>Longueur LFT</dt><dd>${d.declared != null ? fmt(d.declared, 0) + ' mm' : '—'}</dd>
+      <dt>Livrable</dt><dd>${deb
+          ? '<b class="warn-txt">fiche de débit</b>' : '<b class="bad">aucun</b>'}</dd>
+    </dl>
+    <h3 class="sec">Débit</h3>
+    <dl class="kv">
+      <dt>Longueur</dt><dd>${d.declared != null ? fmt(d.declared, 0) + ' mm' : '—'}</dd>
+      <dt>Quantité</dt><dd>${d.quantite != null ? fmt(d.quantite, 0) : '—'}</dd>
+      <dt>Ø extérieur</dt><dd>${d.diameter ? d.diameter + ' mm' : '—'}</dd>
+      <dt>Épaisseur paroi</dt><dd>${d.wall != null ? d.wall + ' mm' : '—'}</dd>
     </dl>
     <h3 class="sec">Matière</h3>
     <dl class="kv">
@@ -731,13 +768,19 @@ function renderOutOfScope(d) {
       <dt>Code BSA</dt><dd>${esc(m.code_matiere) || '—'}</dd>
       <dt>Famille</dt><dd>${esc(m.famille) || '—'}</dd>
     </dl>
-    <h3 class="sec">Pourquoi cette pièce est écartée</h3>
-    <div class="issue alerte"><div><b>${esc(d.reason || 'hors périmètre')}</b>
+    <h3 class="sec">Pourquoi cette pièce n'a pas de plan</h3>
+    <div class="issue ${deb ? 'alerte' : 'erreur'}"><div><b>${esc(d.reason || '')}</b>
       ${esc(d.reason_label || '')}</div></div>
-    <p class="note">Ni plan ni modèle 3D ne sont produits. La pièce reste
-      listée, ici comme dans <em>INDEX.xlsx</em>, avec ce motif : une campagne
-      rend compte de toutes les lignes lues, y compris celles qu'elle n'a pas
-      traitées.</p>`;
+    ${(d.notes || []).map((n) => `<div class="issue info"><div>${esc(n)}</div></div>`).join('')}
+    <p class="note">${deb
+      ? `Aucun plan de cintrage ni modèle 3D : la forme n'est pas calculable.
+         L'export écrit une <em>fiche de débit</em> dans <code>debits/</code> —
+         matière, longueur, quantité — qui porte un bandeau interdisant de la
+         confondre avec un plan de fabrication.`
+      : `Ni plan, ni fiche, ni modèle 3D : il n'y a ni longueur ni matière
+         identifiable sur cette ligne.`}
+      La pièce reste listée, ici comme dans <em>INDEX.xlsx</em>, avec ce motif :
+      une campagne rend compte de toutes les lignes lues.</p>`;
 
   renderDiag(d);
   renderLft(d);
@@ -753,12 +796,15 @@ function applyLoaded(data) {
   S.uid = null;
   renderList();
   const all = S.lots.flatMap((l) => l.tubes);
-  const inScope = all.filter((t) => t.scope !== 'exclue');
-  const ok = inScope.filter((t) => t.status !== 'erreur').length;
+  const debits = all.filter((t) => t.cut_only).length;
+  const nuls = all.filter((t) => t.scope === 'exclue').length;
+  const plans = all.length - debits - nuls;
+  const ok = all.filter((t) => !t.cut_only && t.scope !== 'exclue'
+                               && t.status !== 'erreur').length;
   const lots = S.lots.length;
-  say(`${data.count} pièce(s) dans ${lots} lot(s) — ${inScope.length} dans le périmètre `
-      + `PROGCRIPPA, ${all.length - inScope.length} exclue(s) — ${ok} exploitable(s), `
-      + `${all.length - ok} à corriger.`);
+  say(`${data.count} pièce(s) dans ${lots} lot(s) — ${plans} avec plan et 3D `
+      + `(${ok} sans erreur), ${debits} en fiche de débit`
+      + (nuls ? `, ${nuls} sans livrable.` : '.'));
   (data.warnings || []).forEach((w) => console.warn('LFT :', w));
   if (all.length) select(all[0].uid);
 }
@@ -988,8 +1034,11 @@ async function refreshBatch() {
   const sum = st.summary || {};
   const bilan = sum.pieces != null
     ? ` — ${sum.pieces} pièce(s) : ${sum.traitees} cintrée(s), `
-      + `${sum.tubes_droits || 0} droite(s), ${sum.exclues} hors périmètre · `
-      + `${sum.plans} plan(s), ${sum.modeles_3d} modèle(s)`
+      + `${sum.tubes_droits || 0} droite(s), ${sum.debits || 0} fiche(s) de débit`
+      + (sum.exclues ? `, ${sum.exclues} sans livrable` : '') + ' · '
+      + `${sum.plans} plan(s), ${sum.fiches_debit || 0} fiche(s), `
+      + `${sum.modeles_3d} modèle(s)`
+      + (sum.sans_3d ? ` (${sum.sans_3d} refusé(s))` : '')
     : '';
   $('#batchState').textContent = st.error
     ? `Échec : ${st.error}`

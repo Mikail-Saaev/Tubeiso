@@ -68,7 +68,20 @@ class Piece:
 
     @property
     def in_scope(self) -> bool:
+        """La piece produit au moins un fichier."""
         return bool(self.verdict and self.verdict.ok)
+
+    @property
+    def cut_only(self) -> bool:
+        """Forme non definie : fiche de debit, jamais de plan ni de 3D."""
+        return bool(self.verdict and self.verdict.cut_only)
+
+    @property
+    def no_3d(self) -> str:
+        """Motif qui interdit le modele 3D, ou chaine vide."""
+        if self.cut_only:
+            return self.verdict.reason
+        return validate.unsafe(self.issues)
 
     @property
     def ref(self) -> str:
@@ -210,6 +223,14 @@ class Session:
                 self._build(p)
         return self.summary()
 
+    def _centerline(self, tube):
+        """Fibre neutre, ou None. Le controle de longueur doit s'appuyer sur
+        elle : c'est elle qui sert a exporter le solide."""
+        try:
+            return geometry.build(tube, handedness=self.config.handedness)
+        except Exception:
+            return None
+
     def _build(self, p: Piece) -> None:
         """Perimetre -> programme -> geometrie -> controles, pour une piece."""
         rec = p.record
@@ -221,36 +242,39 @@ class Session:
         diameter = p.verdict.diameter or code_mat_diameter(rec.get("CODE_MAT"))
 
         if p.verdict.straight:
-            # Rigide, sans programme : une droite et un diametre suffisent.
+            # Rigide, sans coudes : une droite et un diametre suffisent.
             # [Info Crippa] « meme s'il n'y a pas de programme, il faut generer
             # la 3D avec uniquement la longueur et le diametre. »
-            tooling = self.config.for_program("", diameter, rec.get("CODE_MAT"))
+            tooling = scope.tooling_for(self.config, p.verdict, rec)
+            length = float(p.verdict.length or lft_length or 0.0)
             p.raw = raw
             p.tooling = tooling
             p.recut = rec.recut
-            p.tube = conv.build_straight(p.ref, float(lft_length or 0.0),
+            p.tube = conv.build_straight(p.ref, length,
                                          diameter or tooling.diameter, tooling)
             p.tube.list_number = rec.list_number
             p.tube.program_number = rec.program_number
             p.tube.warnings.extend(rec.warnings)
             p.issues = validate.check(p.tube, tooling,
+                                      centerline=self._centerline(p.tube),
                                       length_tol=self.config.tolerance,
                                       lft_length=lft_length)
             return
 
-        if not p.verdict.ok:
-            # Hors perimetre : AUCUNE geometrie n'est fabriquee, pas meme pour
-            # l'affichage. La version precedente construisait un tube droit
-            # « pour avoir quelque chose a montrer » — et un tuyau souple de
-            # 5 m s'affichait en 3D avec un developpe, ce qu'un operateur
-            # pouvait prendre pour une piece reelle.
+        if not p.verdict.modelled:
+            # Forme non definie ou piece sans livrable : AUCUNE geometrie n'est
+            # fabriquee, pas meme pour l'affichage. La version precedente
+            # construisait un tube droit « pour avoir quelque chose a montrer »
+            # — et un tuyau souple de 5 m s'affichait en 3D avec un developpe,
+            # ce qu'un operateur pouvait prendre pour une piece reelle.
             p.raw = raw
-            p.tooling = self.config.for_program("", diameter,
-                                                rec.get("CODE_MAT"))
+            p.tooling = scope.tooling_for(self.config, p.verdict, rec)
             p.recut = rec.recut
             p.tube = None
+            level = validate.WARN if p.verdict.ok else validate.ERROR
+            code = "forme_non_definie" if p.verdict.cut_only else "sans_livrable"
             p.issues = [validate.Issue(
-                validate.WARN, "hors_perimetre",
+                level, code,
                 f"{p.verdict.reason} — {p.verdict.detail}", "périmètre")]
             return
 
@@ -271,7 +295,9 @@ class Session:
         p.tube.program_number = rec.program_number
         p.tooling = tooling
         p.tube.warnings.extend(rec.warnings)
-        p.issues = validate.check(p.tube, tooling, recut=p.recut,
+        p.issues = validate.check(p.tube, tooling,
+                                  centerline=self._centerline(p.tube),
+                                  recut=p.recut,
                                   length_tol=self.config.tolerance,
                                   lft_length=lft_length)
 
@@ -314,8 +340,14 @@ class Session:
                     "recut": p.recut,
                     "complete": True if hors else t.complete,
                     "straight": bool(p.verdict and p.verdict.straight),
+                    "cut_only": p.cut_only,
+                    "no_3d": p.no_3d,
+                    "livrable": (p.verdict.as_dict()["livrable"]
+                                 if p.verdict else "aucun"),
                     "rows": len(p.record.rows),
-                    "status": "exclue" if not p.in_scope else validate.worst(p.issues),
+                    "status": ("exclue" if not p.in_scope else
+                               "débit" if p.cut_only else
+                               validate.worst(p.issues)),
                 })
             lots.append({"number": lot.number, "label": lot.label,
                          "count": len(items), "tubes": items})
@@ -407,6 +439,9 @@ class Session:
             "issues": [{"level": i.level, "code": i.code, "message": i.message,
                         "source": i.source} for i in p.issues],
             "status": validate.worst(p.issues),
+            "no_3d": p.no_3d,
+            "livrable": p.verdict.as_dict()["livrable"] if p.verdict else "",
+            "notes": list(p.verdict.notes) if p.verdict else [],
             "fields": self.fields(p),
             "simulation": {
                 "straights": [round(v, 4) for v in tube.straights],
@@ -418,30 +453,36 @@ class Session:
         }
 
     def _detail_out_of_scope(self, p: Piece) -> dict:
-        """Ce qu'on affiche d'une piece ecartee : son identite, sa matiere et
-        le motif. Pas de geometrie, pas de developpe, pas de maillage."""
+        """Ce qu'on affiche d'une piece sans forme : son identite, sa matiere,
+        sa longueur et le motif. Pas de geometrie, pas de developpe, pas de
+        maillage — et le livrable annonce, pour qu'on sache quoi en attendre."""
         v = p.verdict
         return {
             "uid": p.uid, "ref": p.ref, "lot": p.lot,
             "programme": p.record.program_number,
             "liste": p.record.list_number,
             "out_of_scope": True,
+            "cut_only": p.cut_only,
+            "no_3d": p.no_3d,
+            "livrable": v.as_dict()["livrable"] if v else "aucun",
             "scope": v.status if v else "exclue",
             "reason": v.reason if v else "",
             "reason_label": v.detail if v else "",
+            "notes": list(v.notes) if v else [],
             "matiere": v.as_dict() if v else None,
             "diameter": (v.diameter if v else None) or 0,
             "wall": v.material.wall if v and v.material else None,
             "material": v.material.designation if v and v.material else None,
             "source": p.record.iso or "",
             "comment": "",
-            "declared": p.record.number("LONGUEUR"),
+            "declared": (v.length if v else None) or p.record.number("LONGUEUR"),
+            "quantite": p.record.number("QTE_DEB"),
             "straights": [], "bends": [], "primitives": [],
             "polyline": [], "vertices": [], "tangents": [],
             "mesh": None, "mesh_error": None,
             "issues": [{"level": i.level, "code": i.code, "message": i.message,
                         "source": i.source} for i in p.issues],
-            "status": "exclue",
+            "status": "débit" if p.cut_only else "exclue",
             "fields": self.fields(p),
             "simulation": None,
         }
@@ -489,6 +530,34 @@ class Session:
             angle_mode=self.config.angle_mode,
         )
 
+    def debit_data(self, p: Piece) -> render.PlanData:
+        """Donnees d'une fiche de debit : un tube droit fictif, non exporte.
+
+        Il n'existe que pour n'avoir qu'un seul chemin vers la mise en page.
+        La fiche porte un bandeau qui dit que la forme n'est pas definie, et
+        aucun modele 3D n'est ecrit a partir de lui.
+        """
+        conv = conventions.get(self.config.convention)
+        rec, v = p.record, p.verdict
+        tooling = p.tooling or scope.tooling_for(self.config, v, rec)
+        length = float((v.length if v else None) or rec.number("LONGUEUR") or 0.0)
+        tube = conv.build_straight(p.ref, length,
+                                   (v.diameter if v else None) or 0.0, tooling)
+        tube.list_number = rec.list_number
+        tube.program_number = rec.program_number
+        tube.comment = (v.detail if v else "") or "forme non définie"
+        tube.straight = False
+        cl = geometry.build(tube, handedness=self.config.handedness) \
+            if length > 0 else None
+        keep_tube, keep_tooling = p.tube, p.tooling
+        p.tube, p.tooling = tube, tooling
+        try:
+            data = self.plan_data(p, cl)
+        finally:
+            p.tube, p.tooling = keep_tube, keep_tooling
+        data.issues = []
+        return data
+
     # ---------------------------------------------------------------- exports
     def export(self, uids: list[str], out_dir: str, formats: list[str],
                by_type: bool = True) -> dict:
@@ -516,17 +585,64 @@ class Session:
             # rester unique, donc on prefixe par le lot quand il y en a plusieurs
             if not p.in_scope:
                 failed.append({"ref": p.ref,
-                               "error": f"hors périmètre : {p.verdict.detail}"})
+                               "error": f"sans livrable : {p.verdict.detail}"})
                 continue
             # Le nom porte la LFT d'origine et le repere : un fichier isole
             # dans un dossier de sous-traitance doit dire d'ou il vient.
             name = registry.output_basename(
                 Path(self.source).stem if self.source else "", p.ref)
+
+            # Forme non definie : une fiche de debit et rien d'autre. Elle part
+            # dans debits/, pas dans plans/, pour qu'elle ne puisse pas etre
+            # confondue avec un plan de fabrication.
+            if p.cut_only:
+                refuses = [f for f in formats if f in ("step", "stl", "brep", "dxf")]
+                if refuses:
+                    failed.append({
+                        "ref": p.ref,
+                        "error": f"forme non définie ({p.verdict.reason}) : "
+                                 f"pas de {', '.join(refuses).upper()}, "
+                                 "seule une fiche de débit est produite"})
+                try:
+                    data = self.debit_data(p)
+                    if "pdf" in formats:
+                        done.append(str(render.debit_sheet(
+                            data, dest("debit") / f"{name}.pdf",
+                            p.verdict.reason, p.verdict.detail)))
+                    if "svg" in formats:
+                        q = dest("svg") / f"{name}.svg"
+                        q.write_text(render.debit_svg(
+                            data, p.verdict.reason, p.verdict.detail),
+                            encoding="utf-8")
+                        done.append(str(q))
+                    if "json" in formats:
+                        q = dest("json") / f"{name}.json"
+                        q.write_text(json.dumps(self._detail(p, 0.2),
+                                                ensure_ascii=False, indent=2,
+                                                default=str), encoding="utf-8")
+                        done.append(str(q))
+                except Exception as exc:
+                    app_log.debug("fiche %s", p.ref, exc_info=True)
+                    failed.append({"ref": p.ref,
+                                   "error": f"{type(exc).__name__}: {exc}"})
+                continue
+
             try:
                 if p.tube is None:                               # pragma: no cover
                     raise ValueError("aucune géométrie pour cette pièce")
                 cl = geometry.build(p.tube, handedness=self.config.handedness)
-                for fmt in [f for f in formats if f in ("step", "stl", "brep")]:
+                blocked = validate.unsafe(p.issues)
+                wanted_3d = [f for f in formats if f in ("step", "stl", "brep")]
+                if blocked and wanted_3d:
+                    # Un STEP faux part chez un sous-traitant sans que personne
+                    # ne relise le plan. Le plan, lui, est ecrit : il porte le
+                    # bandeau ERREUR qui dit exactement ce qui cloche.
+                    failed.append({
+                        "ref": p.ref,
+                        "error": f"pas de modèle 3D : {blocked} — la géométrie "
+                                 "n'est pas fiable, seul le plan est écrit"})
+                    wanted_3d = []
+                for fmt in wanted_3d:
                     for f in solid.export(p.tube, cl, dest(fmt), p.tooling,
                                           [fmt], basename=name):
                         done.append(str(f))

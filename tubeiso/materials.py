@@ -218,6 +218,26 @@ def diameter(code: object) -> int | None:
     return int(m.od)
 
 
+def outer_diameter(code: object) -> float | None:
+    """Diametre exterieur, quelle que soit la famille et quel que soit
+    l'outillage disponible.
+
+    A distinguer de `diameter()`, qui ne repond que pour les tubes CINTRABLES.
+    Un Ermeto Ø28 n'a pas de matrice de cintrage chez BSA, mais coupe droit il
+    se modelise parfaitement : le refuser revenait a jeter tout le parc rigide
+    hors Ø4-Ø18.
+    """
+    m = lookup(code)
+    if m is None or not m.od:
+        return None
+    return float(m.od)
+
+
+def wall_of(code: object) -> float | None:
+    m = lookup(code)
+    return m.wall if m else None
+
+
 def describe(code: object) -> str:
     """Libelle court pour l'interface et les plans."""
     m = lookup(code)
@@ -231,4 +251,5 @@ def describe(code: object) -> str:
 
 
 __all__ = ["Material", "RIGIDE", "SOUPLE", "BY_CODE", "CRIMPABLE_OD", "FINISH",
-           "lookup", "kind_of", "is_bendable", "diameter", "describe", "digits"]
+           "lookup", "kind_of", "is_bendable", "diameter", "outer_diameter",
+           "wall_of", "describe", "digits"]

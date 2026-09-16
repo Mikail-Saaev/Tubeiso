@@ -46,7 +46,8 @@
       <span><i class="dot info"></i>conforme</span>
       <span><i class="dot warn"></i>alerte</span>
       <span><i class="dot err"></i>erreur</span>
-      <span><i class="dot out"></i>hors périmètre</span>
+      <span><i class="dot debit"></i>débit seul</span>
+      <span><i class="dot out"></i>sans livrable</span>
     </div>
   </aside>
 
@@ -55,6 +56,9 @@
       <canvas id="scene"></canvas>
       <div id="labels"></div>
       <div id="hint" class="hint">Ouvrez un fichier LFT ou un STEP pour commencer.</div>
+      <!-- La forme affichée peut être fausse : il faut le dire SUR la vue, pas
+           seulement dans un panneau que personne ne lit avant d'exporter. -->
+      <div id="nomodel" class="nomodel" hidden></div>
       <div id="spinner" class="spinner" hidden><i></i></div>
     </div>
     <div id="simbar" class="toolbar sim" hidden>
@@ -71,7 +75,7 @@
       </label>
       <span id="simStep" class="readout"></span>
     </div>
-    <div class="toolbar">
+    <div id="viewbar" class="toolbar">
       <div class="group">
         <button data-toggle="mesh" class="on" title="Solide">Solide</button>
         <button data-toggle="wire" title="Filaire">Filaire</button>

@@ -34,6 +34,15 @@ DS_SUSPECT = 2.0
 MIN_STRAIGHT_PIECE = 20.0
 BAR_LENGTH = 6000.0
 
+# Un programme complet referme son equation de longueur a 1.2 mm pres sur le
+# corpus. Au-dela de ce seuil, la troncature a bien mange des blocs.
+TRUNCATION_TOL = 2.0
+
+# Anomalies qui interdisent d'ecrire un modele 3D : la geometrie est fausse,
+# pas seulement douteuse. Un STEP faux part chez un sous-traitant sans que
+# personne ne relise le plan.
+UNSAFE_CODES = {"programme_tronque_perte", "diametre_absent", "longueur_absente"}
+
 
 @dataclass
 class Issue:
@@ -58,7 +67,11 @@ def check(tube: TubeProgram, tooling: Tooling,
         if ("retour elastique" in w or "reconstitue depuis" in w
                 or "faux pli" in w):
             lvl = INFO
-        elif "negatif" in w or "incomplet" in w:
+        elif "negatif" in w:
+            # Un segment negatif est une impossibilite geometrique : le
+            # programme ne decrit pas la piece qu'il pretend decrire.
+            # Une simple absence de M30, elle, ne prouve rien : c'est le
+            # controle de longueur plus bas qui mesure ce qui manque.
             lvl = ERROR
         else:
             lvl = WARN
@@ -90,10 +103,38 @@ def check(tube: TubeProgram, tooling: Tooling,
                              "barre standard, vérifier l'approvisionnement"))
         return out
 
+    # --- programme tronque : on ne rejette plus en bloc, on mesure.
+    # Une troncature a 255 caracteres n'emporte pas toujours de la geometrie :
+    # sur le corpus d'essai, l'une des quatre ne perdait que sa fin de ligne.
+    # Le developpe recalcule est le juge : le dernier segment vient alors du DS
+    # et non de R6, donc l'equation ne se referme plus toute seule et l'ecart
+    # mesure exactement la matiere manquante.
     if not tube.complete:
-        out.append(Issue(ERROR, "programme_tronque",
-                         "pas de M30 : geometrie inexploitable", "255 car."))
-        return out
+        dev = centerline.developed if centerline is not None else None
+        if dev is None:
+            try:
+                dev = geometry.developed_length(tube)
+            except Exception:                                    # pragma: no cover
+                dev = None
+        ref = tube.declared_length or lft_length
+        if dev is None or not ref:
+            out.append(Issue(ERROR, "programme_tronque",
+                             "pas de M30, et aucune longueur de référence pour "
+                             "vérifier ce qui manque", "255 car."))
+            return out
+        ecart = dev - float(ref)
+        if abs(ecart) <= TRUNCATION_TOL:
+            out.append(Issue(WARN, "programme_tronque",
+                             f"pas de M30, mais le développé recalculé "
+                             f"({dev:.1f} mm) colle à R6 ({ref:g} mm, "
+                             f"{ecart:+.1f}) : la troncature n'a pas emporté "
+                             "de géométrie", "255 car."))
+        else:
+            out.append(Issue(ERROR, "programme_tronque_perte",
+                             f"pas de M30 et {abs(ecart):.0f} mm de matière "
+                             f"manquante ({dev:.1f} mm recalculés contre "
+                             f"{ref:g} mm déclarés) : géométrie incomplète",
+                             "255 car."))
     if d not in bsa.RM:
         out.append(Issue(ERROR, "diametre_inconnu",
                          f"Ø{tube.diameter:g} absent des tables BSA", "DOC p.4"))
@@ -222,6 +263,14 @@ def _check_length(out: list[Issue], tube: TubeProgram, recut: float,
                              f"LONGUEUR={lft_length:g} contredit R6="
                              f"{tube.declared_length:g} ({delta:+.1f} mm)",
                              "colonne LFT"))
+
+
+def unsafe(issues: list[Issue]) -> str:
+    """Motif qui interdit l'export 3D, ou chaine vide."""
+    for i in issues:
+        if i.code in UNSAFE_CODES and i.level == ERROR:
+            return i.code
+    return ""
 
 
 def worst(issues: list[Issue]) -> str:

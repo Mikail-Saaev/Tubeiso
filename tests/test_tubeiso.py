@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -286,27 +287,39 @@ def test_perimetre_progcrippa():
             v = self.cells.get(col)
             return float(v) if isinstance(v, (int, float)) else None
 
-    v = scope.evaluate(Rec("769-421-035", PROG))
-    assert not v.ok and v.reason == scope.MATIERE_SOUPLE
+    # un tuyau souple SANS programme n'a pas de forme : fiche de debit, pas de
+    # plan, pas de 3D — mais il n'est plus jete, sa matiere sert a commander.
+    v = scope.evaluate(Rec("769-421-035", "", longueur=5000))
+    assert v.ok and v.cut_only and not v.modelled
+    assert v.reason == scope.MATIERE_SOUPLE and v.status == scope.DEBIT
 
-    # sans programme ET sans longueur, il n'y a rien a modeliser
+    # meme code, mais AVEC un programme de cintrage : le programme fait foi,
+    # et la contradiction est signalee en remarque.
+    raw = crippa.parse(PROG)
+    v = scope.evaluate(Rec("769-421-035", PROG), raw)
+    assert v.ok and v.modelled and v.status == scope.TRAITE
+    assert any("souple" in n for n in v.notes)
+
+    # sans programme ET sans longueur, il n'y a rien a mettre sur le papier
     v = scope.evaluate(Rec("293-421-006", ""))
     assert not v.ok and v.reason == scope.LONGUEUR_ABSENTE
 
     # sans programme mais avec une longueur : tube droit, donc traite
     v = scope.evaluate(Rec("293-421-006", "", droit=True, longueur=300))
     assert v.ok and v.straight and v.reason == scope.TUBE_DROIT
+    assert v.length == 300
 
     v = scope.evaluate(Rec("293-421-006", "", main=True, longueur=300))
-    assert not v.ok and v.reason == scope.FAIT_MAIN
+    assert v.ok and v.cut_only and v.reason == scope.FAIT_MAIN
 
-    raw = crippa.parse(PROG)
     v = scope.evaluate(Rec("293-421-006", PROG), raw)
     assert v.ok and v.diameter == 6 and v.kind == "rigide"
 
+    # un programme tronque n'est plus rejete en bloc : il est traite, signale,
+    # et c'est le controle de longueur qui decidera du modele 3D.
     tronque = PROG.replace("M30", "")
     v = scope.evaluate(Rec("293-421-006", tronque), crippa.parse(tronque))
-    assert not v.ok and v.reason == scope.PROGRAMME_TRONQUE
+    assert v.ok and v.modelled and v.reason == scope.PROGRAMME_TRONQUE
 
 
 # --------------------------------------------------- v6 : correctifs de lecture
@@ -481,10 +494,13 @@ def test_campagne_range_et_indexe():
         out = Path(tmp) / "biblio"
         campagne = batch.run([src], out, batch.Options(models=False))
         s = campagne.summary()
-        # 412 est cintre, 901 est un tube droit rigide, 900 est un flexible
+        # 412 est cintre, 901 est un tube droit rigide, 900 est un flexible :
+        # il n'a pas de forme, mais il a une matiere et une longueur, donc une
+        # fiche de debit — et surtout pas un plan.
         assert s["pieces"] == 3
-        assert s["traitees"] == 1 and s["tubes_droits"] == 1 and s["exclues"] == 1
-        assert s["plans"] == 2
+        assert s["traitees"] == 1 and s["tubes_droits"] == 1
+        assert s["debits"] == 1 and s["exclues"] == 0
+        assert s["plans"] == 2 and s["fiches_debit"] == 1
 
         # Arborescence a plat : un dossier par type, pas de niveaux imbriques.
         base = "BCH_ESSAI_0001_0792-0002-JV"
@@ -494,8 +510,11 @@ def test_campagne_range_et_indexe():
         assert (out / "cahiers" / f"{base}_cahier.pdf").exists()
         assert not (out / "plans" / f"{base}_900.pdf").exists(), \
             "un tuyau souple ne doit produire aucun plan"
+        fiche = out / "debits" / f"{base}_900.pdf"
+        assert fiche.exists(), "le tuyau souple sort en fiche de debit"
+        assert b"FICHE DE D" in fiche.read_bytes()[:200] or fiche.stat().st_size > 800
         dossiers = {d.name for d in out.iterdir() if d.is_dir()}
-        assert dossiers == {"plans", "donnees", "cahiers"}, dossiers
+        assert dossiers == {"plans", "debits", "donnees", "cahiers"}, dossiers
         assert not any(d.is_dir() for d in (out / "plans").iterdir()), \
             "aucun sous-dossier sous plans/"
 
@@ -505,6 +524,12 @@ def test_campagne_range_et_indexe():
         assert donnees["cintrage"]["lra"][0]["r15_programme"] == 46
         assert len(donnees["geometrie"]["sommets_xyz"]) == tube_sommets(donnees)
 
+        souple = json.loads(
+            (out / "donnees" / f"{base}_900.json").read_text("utf-8"))
+        assert souple["forme"]["definie"] is False
+        assert souple["debit"]["longueur_a_debiter"] == 5000
+        assert "cintrage" not in souple and "geometrie" not in souple
+
         index = load_workbook(out / "INDEX.xlsx")
         assert index.sheetnames == ["Tubes", "LFT", "Campagne"]
         assert index["Tubes"].max_row == 4          # en-tete + 3 pieces
@@ -512,7 +537,7 @@ def test_campagne_range_et_indexe():
                   for r in range(2, 5)}
         assert "matière_souple" in motifs
         statuts = {index["Tubes"].cell(row=r, column=8).value for r in range(2, 5)}
-        assert statuts == {"traitée", "tube droit", "exclue"}
+        assert statuts == {"traitée", "tube droit", "débit seul"}
 
         # reprise : la meme campagne relancee ne refait rien
         assert (out / batch.STATE_FILE).exists(), "l'etat de reprise doit exister"
@@ -610,13 +635,14 @@ def test_tube_rigide_sans_programme_est_traite():
     v = scope.evaluate(Rec("293-421-008", None, droit=True))
     assert not v.ok and v.reason == scope.LONGUEUR_ABSENTE
 
-    # un souple reste exclu, meme droit
+    # un souple n'a pas de forme, meme droit : fiche de debit, pas de modele
     v = scope.evaluate(Rec("769-421-035", 5000, droit=True))
-    assert not v.ok and v.reason == scope.MATIERE_SOUPLE
+    assert v.ok and v.cut_only and v.reason == scope.MATIERE_SOUPLE
 
-    # un rigide hors outillage aussi
+    # un rigide hors outillage de cintrage se coupe droit : BSA ne le plie pas,
+    # donc l'absence de matrice ne l'empeche pas d'etre modelise.
     v = scope.evaluate(Rec("293-421-028", 900, droit=True))
-    assert not v.ok and v.reason == scope.HORS_OUTILLAGE
+    assert v.ok and v.straight and v.diameter == 28 and v.wall == 3.0
 
 
 def test_plan_d_un_tube_droit():
@@ -700,8 +726,12 @@ def test_tube_droit_sans_diametre_est_refuse():
     assert "tube_droit_court" in {i.code for i in validate.check(court, tl8)}
 
 
-def test_piece_hors_perimetre_n_a_aucune_geometrie():
-    """Le serveur ne doit jamais inventer un modèle pour une pièce écartée."""
+def test_piece_sans_forme_sort_une_fiche_de_debit():
+    """Le serveur ne doit jamais inventer un modèle pour une pièce sans forme.
+
+    Un tuyau souple n'a ni rayon, ni angles, ni géométrie : il sort une fiche
+    de débit, dans son propre dossier, et l'export 3D est refusé avec un motif.
+    """
     import tempfile
 
     from openpyxl import Workbook
@@ -724,18 +754,23 @@ def test_piece_hors_perimetre_n_a_aucune_geometrie():
         tubes = [t for l in c.get("/api/tubes").get_json()["lots"]
                  for t in l["tubes"]]
         souple = next(t for t in tubes if t["ref"] == "9")
-        assert souple["scope"] == "exclue" and souple["nature"] == "souple"
+        assert souple["scope"] == "débit seul" and souple["nature"] == "souple"
+        assert souple["cut_only"] is True and souple["status"] == "débit"
+        assert souple["livrable"] == "fiche de débit"
 
         d = c.get(f"/api/tube/{souple['uid']}").get_json()
-        assert d["out_of_scope"] is True
+        assert d["out_of_scope"] is True and d["cut_only"] is True
         assert d["polyline"] == [] and d["bends"] == [] and d["mesh"] is None
-        assert "developed" not in d, "aucun développé pour une pièce écartée"
+        assert "developed" not in d, "aucun développé pour une pièce sans forme"
+        assert d["declared"] == 5000, "la longueur reste disponible pour le débit"
 
-        # et l'export la refuse, avec un motif
+        # l'export ecrit la fiche, et refuse le 3D avec un motif
         r = c.post("/api/export", json={"uids": [souple["uid"]], "dir": tmp,
                                         "formats": ["step", "pdf"]}).get_json()
-        assert r["written"] == [] and r["failed"]
-        assert "hors périmètre" in r["failed"][0]["error"]
+        assert len(r["written"]) == 1 and r["written"][0].endswith(".pdf")
+        assert "debits" in r["written"][0], r["written"][0]
+        assert r["failed"] and "forme non définie" in r["failed"][0]["error"]
+        assert "STEP" in r["failed"][0]["error"]
 
 
 def test_export_range_par_type():
@@ -745,9 +780,172 @@ def test_export_range_par_type():
     from tubeiso import batch
 
     assert batch.folder_for("pdf") == "plans"
+    assert batch.folder_for("debit") == "debits"
     assert batch.folder_for(".stp") == "step"
     assert batch.folder_for("json") == "donnees"
     assert batch.folder_for("zzz") == "autres"
+
+
+# ------------------------------- v6.3 : le modèle 3D suit la fiabilité du plan
+
+def test_programme_tronque_sans_perte_garde_son_modele():
+    """Une troncature qui ne mange que la fin de ligne ne coûte rien.
+
+    L'ancienne règle rejetait tout programme sans M30, alors qu'un `M30`
+    manquant ne retire aucune géométrie : le développé recalculé referme
+    l'équation de longueur au millimètre près.
+    """
+    from tubeiso import conventions, geometry, validate
+    from tubeiso.config import Config
+    from tubeiso.parsers import crippa
+
+    cfg = Config.load(None)
+    raw = crippa.parse(PROG.replace("M30", ""))
+    assert not raw.complete, "le programme doit bien être vu comme tronqué"
+    tooling = cfg.for_program(raw.tooling, raw.diameter, "293-421-006")
+    tube = conventions.get("bsa").build(raw, tooling, angle_mode=cfg.angle_mode)
+    cl = geometry.build(tube)
+    issues = validate.check(tube, tooling, centerline=cl)
+    codes = {i.code: i.level for i in issues}
+    assert codes.get("programme_tronque") == validate.WARN
+    assert "programme_tronque_perte" not in codes
+    assert validate.unsafe(issues) == "", "le modèle 3D reste autorisé"
+
+
+def test_programme_tronque_avec_perte_perd_son_modele():
+    """Une troncature qui mange des blocs interdit le STEP, pas le plan.
+
+    Un solide faux part chez un sous-traitant sans que personne ne relise le
+    plan : c'est le seul cas où l'application refuse d'écrire un modèle.
+    """
+    from tubeiso import conventions, geometry, validate
+    from tubeiso.config import Config
+    from tubeiso.parsers import crippa
+
+    cfg = Config.load(None)
+    entier = crippa.parse(PROG)
+    # on coupe le dernier bloc de cintrage : le tube perd un coude et sa droite
+    lignes = [l for l in PROG.splitlines() if l.strip()]
+    coupe = "\n".join(lignes[:-2])
+    raw = crippa.parse(coupe)
+    assert len(raw.blocks) < len(entier.blocks), "il faut vraiment perdre un bloc"
+
+    tooling = cfg.for_program(raw.tooling, raw.diameter, "293-421-006")
+    tube = conventions.get("bsa").build(raw, tooling, angle_mode=cfg.angle_mode)
+    tube.declared_length = entier.declared_length      # R6 reste celui du tout
+    cl = geometry.build(tube)
+    issues = validate.check(tube, tooling, centerline=cl)
+    assert validate.unsafe(issues) == "programme_tronque_perte"
+    perte = next(i for i in issues if i.code == "programme_tronque_perte")
+    assert perte.level == validate.ERROR
+    assert "mm" in perte.message, "le message doit chiffrer ce qui manque"
+
+
+def test_campagne_refuse_le_step_mais_ecrit_le_plan():
+    """Bout en bout : plan écrit, bandeau ERREUR, aucun STEP."""
+    import tempfile
+
+    from openpyxl import Workbook
+
+    from tubeiso import batch
+
+    lignes = [l for l in PROG.splitlines() if l.strip()]
+    coupe = "\n".join(lignes[:-2])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "sources"
+        src.mkdir()
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["REP", "CODE_MAT", "LONGUEUR", "LISTE", "PROGRAMME",
+                   "PROGCRIPPA", "DROIT"])
+        ws.append(["7", "293-421-006", 263, "0001-0000-AA", "P", coupe, "Faux"])
+        wb.save(src / "BCH_ESSAI_0002_0001-0000-AA.xlsx")
+
+        out = Path(tmp) / "biblio"
+        campagne = batch.run([src], out, batch.Options())
+        row = campagne.rows[0]
+        assert row.statut == "traitée" and row.motif == "programme_tronqué"
+        assert row.plan_pdf, "le plan doit être écrit"
+        assert not row.modele_3d, "le STEP doit être refusé"
+        assert row.sans_3d == "programme_tronque_perte"
+        assert row.controle == "ERREUR"
+        assert campagne.summary()["sans_3d"] == 1
+        assert not (out / "step").exists()
+
+
+def test_couverture_du_cahier_est_paginee():
+    """Un lot de soixante pièces ne tient pas sur une page.
+
+    L'ancienne couverture écrivait toutes les lignes à la suite : les
+    dernières sortaient du cadre et le bloc « pièces sans plan » n'était
+    jamais imprimé. Il est en bas de la couverture, donc c'est exactement
+    celui qu'on perdait.
+    """
+    import tempfile
+
+    from tubeiso import conventions, geometry, render, validate
+    from tubeiso.model import Tooling
+
+    tooling = Tooling(name="Ø8", diameter=8, clr=14, wall=1.0, elongation=4.0)
+    conv = conventions.get("bsa")
+    items = []
+    for i in range(60):
+        tube = conv.build_straight(str(100 + i), 500.0 + i, 8, tooling)
+        cl = geometry.build(tube)
+        items.append(render.PlanData(tube=tube, centerline=cl, tooling=tooling,
+                                     issues=validate.check(tube, tooling, cl),
+                                     lft="BCH_ESSAI_0000-0000-XX"))
+    exclus = [{"repere": "9", "motif": "matière_souple",
+               "detail": "tuyau souple", "fiche": True}]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = render.booklet(items, Path(tmp) / "c.pdf", lot_label="ESSAI",
+                             excluded=exclus)
+        data = pdf.read_bytes()
+        assert data.startswith(b"%PDF")
+        pages = data.count(b"/Type /Page\n") or data.count(b"/Type /Page")
+        # 60 pièces × 2 pages + au moins 2 pages de couverture
+        assert pages >= 122, pages
+
+    # la couverture seule, en SVG, pour lire ce qu'elle contient vraiment
+    s = render.sh.SvgSheet(render.PAGE_W, render.PAGE_H)
+    render._cover(s, items, "ESSAI", exclus)
+    textes = [s.to_svg(i) for i in range(3)]
+    assert "CAHIER DE FABRICATION" in textes[0]
+    assert "(suite)" in textes[1], "la seconde page doit porter la mention suite"
+    joint = " ".join(textes)
+    assert "SANS PLAN DE CINTRAGE" in joint
+    assert "fiche de d" in joint, "la sortie de la pièce doit être nommée"
+    # aucune ligne ne doit être écrite sous le cadre
+    for page in textes:
+        for y in re.findall(r'y="([0-9.]+)"', page):
+            assert float(y) <= render.FRAME[3] + 0.5, y
+
+
+def test_le_plan_dit_lui_meme_qu_il_n_a_pas_de_modele():
+    """Le plan part seul chez le sous-traitant : c'est lui qui doit le dire."""
+    from tubeiso import conventions, geometry, render, validate
+    from tubeiso.config import Config
+    from tubeiso.parsers import crippa
+
+    cfg = Config.load(None)
+    entier = crippa.parse(PROG)
+    lignes = [l for l in PROG.splitlines() if l.strip()]
+    raw = crippa.parse("\n".join(lignes[:-2]))
+    tooling = cfg.for_program(raw.tooling, raw.diameter, "293-421-006")
+    tube = conventions.get("bsa").build(raw, tooling, angle_mode=cfg.angle_mode)
+    tube.declared_length = entier.declared_length
+    cl = geometry.build(tube)
+    data = render.PlanData(tube=tube, centerline=cl, tooling=tooling,
+                           issues=validate.check(tube, tooling, centerline=cl),
+                           lft="BCH_ESSAI_0000-0000-XX")
+    assert data.status == "ERREUR"
+    svg = render.to_svg(data)
+    assert "AUCUN MODÈLE 3D N" in svg
+    # le chiffre de la matière manquante ne doit pas être coupé
+    assert "mm de matière manquante" in svg
+    assert "…" not in svg.split("AUCUN MODÈLE")[0].split("CONTRÔLE EN ERREUR")[-1]
 
 
 def _run() -> int:

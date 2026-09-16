@@ -45,12 +45,24 @@ def _load(path: str, column: str = "PROGCRIPPA"):
     return book, out
 
 
-def _make(cfg, rec, raw):
-    """Construit la piece retenue et ses controles."""
+def _make(cfg, rec, raw, verdict=None):
+    """Construit la piece retenue et ses controles, cintree ou droite."""
+    conv = conventions.get(cfg.convention)
+    if verdict is not None and verdict.straight:
+        tooling = cfg.for_program("", verdict.diameter, rec.get("CODE_MAT"))
+        length = float(rec.number("LONGUEUR") or 0.0)
+        tube = conv.build_straight(rec.rep or rec.program_number or rec.key,
+                                   length, verdict.diameter or tooling.diameter,
+                                   tooling)
+        tube.list_number = rec.list_number
+        tube.program_number = rec.program_number
+        tube.warnings.extend(rec.warnings)
+        return tube, tooling, 0.0, validate.check(
+            tube, tooling, length_tol=cfg.tolerance, lft_length=length)
+
     diameter = raw.diameter or materials.diameter(rec.get("CODE_MAT"))
     tooling = cfg.for_program(raw.tooling, diameter, rec.get("CODE_MAT"))
     recut = rec.recut or float(raw.recut or 0.0)
-    conv = conventions.get(cfg.convention)
     tube = conv.build(raw, tooling, recut=recut, angle_mode=cfg.angle_mode)
     tube.ref = rec.rep or rec.program_number
     tube.list_number = rec.list_number
@@ -116,13 +128,14 @@ def cmd_inspect(args) -> int:
                       f"{str(verdict.diameter or '-'):>4} {'-':>7} {'-':>3}  "
                       f"exclue   {verdict.reason} — {verdict.detail[:44]}")
                 continue
-            tube, tooling, _recut, issues = _make(cfg, rec, raw)
+            tube, tooling, _recut, issues = _make(cfg, rec, raw, verdict)
             worst = validate.worst(issues)
             counts[worst] += 1
             detail = next((i.message for i in issues if i.level == worst), "conforme")
+            mark = "droit" if verdict.straight else ""
             print(f"  {ref:>7} {rec.program_number:>18} {verdict.kind:>7} "
                   f"{tube.diameter:>4.0f} {tube.declared_length or 0:>7.0f} "
-                  f"{tube.n_bends:>3}  {worst:8s} {detail[:44]}")
+                  f"{tube.n_bends:>3}  {worst:8s} {mark} {detail[:38]}")
         print()
 
     total_excl = sum(motifs.values())
@@ -177,7 +190,7 @@ def cmd_plan(args) -> int:
             skipped += 1
             continue
 
-        tube, tooling, recut, issues = _make(cfg, rec, raw)
+        tube, tooling, recut, issues = _make(cfg, rec, raw, verdict)
         blocking = [i for i in issues if i.level == ERROR]
         if blocking and not args.force:
             print(f"  {ref:>7}  IGNOREE")
@@ -190,7 +203,7 @@ def cmd_plan(args) -> int:
 
         try:
             cl = geometry.build(tube, handedness=cfg.handedness)
-        except geometry.MissingRadius as exc:
+        except (geometry.MissingRadius, ValueError) as exc:
             print(f"  {ref:>7}  IGNOREE  {exc}")
             skipped += 1
             continue
@@ -199,7 +212,7 @@ def cmd_plan(args) -> int:
                                 length_tol=cfg.tolerance,
                                 lft_length=rec.number("LONGUEUR"))
         pdata = _plan_data(cfg, rec, tube, tooling, cl, issues, args.source, entry, raw)
-        base = registry.safe_name(tube.ref or raw.name)
+        base = registry.output_basename(args.source, tube.ref or ref)
         if args.svg:
             (out / f"{base}.svg").write_text(
                 render.to_svg(pdata, args.azimuth), encoding="utf-8")
@@ -236,7 +249,7 @@ def cmd_model(args) -> int:
             skipped += 1
             continue
 
-        tube, tooling, recut, issues = _make(cfg, rec, raw)
+        tube, tooling, recut, issues = _make(cfg, rec, raw, verdict)
         blocking = [i for i in issues if i.level == ERROR]
         if blocking and not args.force:
             print(f"  {ref:>7}  IGNOREE")
@@ -247,7 +260,8 @@ def cmd_model(args) -> int:
         try:
             cl = geometry.build(tube, handedness=cfg.handedness)
             files = solid.export(tube, cl, out, tooling, formats,
-                                 basename=registry.safe_name(tube.ref or raw.name))
+                                 basename=registry.output_basename(
+                                     args.source, tube.ref or ref))
             rep = solid.report(tube, cl, tooling)
         except (geometry.MissingRadius, solid.SolidError) as exc:
             print(f"  {ref:>7}  IGNOREE  {exc}")
@@ -292,7 +306,8 @@ def cmd_batch(args) -> int:
     print(f"  fichiers LFT      : {s['fichiers']}  "
           f"(sautes {s['fichiers_sautes']}, en erreur {s['fichiers_en_erreur']})")
     print(f"  pieces            : {s['pieces']}")
-    print(f"  traitees          : {s['traitees']}")
+    print(f"  cintrees          : {s['traitees']}")
+    print(f"  tubes droits      : {s['tubes_droits']}")
     print(f"  hors perimetre    : {s['exclues']}")
     print(f"  plans PDF         : {s['plans']}")
     print(f"  modeles 3D        : {s['modeles_3d']}")
@@ -303,7 +318,7 @@ def cmd_batch(args) -> int:
     print(f"\n  index    : {Path(args.output) / 'INDEX.xlsx'}")
     print(f"  rapport  : {Path(args.output) / 'rapport.csv'}")
     print(f"  journal  : {Path(args.output) / 'journal.txt'}")
-    return 0 if s["traitees"] else 1
+    return 0 if (s["traitees"] + s["tubes_droits"]) else 1
 
 
 # ----------------------------------------------------------------------- main

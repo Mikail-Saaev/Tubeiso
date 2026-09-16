@@ -120,7 +120,8 @@ class LftResult:
 
     @property
     def treated(self) -> int:
-        return sum(1 for r in self.rows if r.statut == scope.TRAITE)
+        return sum(1 for r in self.rows
+                   if r.statut in (scope.TRAITE, scope.DROIT))
 
     @property
     def excluded(self) -> int:
@@ -153,6 +154,7 @@ class Campaign:
             "fichiers_en_erreur": sum(1 for f in self.files if f.incident),
             "pieces": len(rows),
             "traitees": sum(1 for r in rows if r.statut == scope.TRAITE),
+            "tubes_droits": sum(1 for r in rows if r.statut == scope.DROIT),
             "exclues": sum(1 for r in rows if r.statut == scope.EXCLU),
             "plans": sum(1 for r in rows if r.plan_pdf),
             "modeles_3d": sum(1 for r in rows if r.modele_3d),
@@ -330,6 +332,10 @@ def process_file(source, out_root, options: Options,
             verdict = scope.evaluate(rec, raw)
             row.statut, row.motif, row.detail = (verdict.status, verdict.reason,
                                                  verdict.detail)
+            # `motif` ne sert qu'aux exclusions : une piece qui sort des
+            # fichiers n'a pas de motif, sinon les comptes ne tombent plus.
+            if verdict.ok:
+                row.motif = ""
             row.nature = verdict.kind
             if verdict.material:
                 row.matiere = verdict.material.designation
@@ -364,7 +370,9 @@ def process_file(source, out_root, options: Options,
             row.anomalies = " | ".join(
                 f"{i.level}:{i.code}" for i in issues if i.level != "info") or ""
 
-            base = registry.safe_name(row.repere, default=f"rep_{len(result.rows)}")
+            # Le nom porte la LFT d'origine : un fichier exporte doit se
+            # rattacher a sa source sans qu'on ait rien a ouvrir.
+            base = registry.output_basename(lft_code, row.repere)
             paths: dict[str, str] = {}
 
             if options.plans:
@@ -429,6 +437,23 @@ def process_file(source, out_root, options: Options,
 
 def _build(rec, raw, verdict, cfg, conv, entry, lft_code, source):
     """Construit la piece, sa geometrie et ses controles."""
+    if verdict.straight:
+        # Pas de programme : une droite, une longueur, un diametre. [Info Crippa]
+        tooling = cfg.for_program("", verdict.diameter, rec.get("CODE_MAT"))
+        length = float(rec.number("LONGUEUR") or 0.0)
+        tube = conv.build_straight(rec.rep or rec.program_number or rec.key,
+                                   length, verdict.diameter or tooling.diameter,
+                                   tooling)
+        tube.list_number = rec.list_number
+        tube.program_number = rec.program_number
+        tube.warnings.extend(rec.warnings)
+        cl = geometry.build(tube, handedness=cfg.handedness)
+        issues = validate.check(tube, tooling, centerline=cl,
+                                length_tol=cfg.tolerance, lft_length=length)
+        data = _plan_data(rec, None, tube, cl, tooling, issues, entry, lft_code,
+                          source, verdict.material, cfg)
+        return data, issues
+
     if raw.declared_length is None and rec.number("LONGUEUR"):
         raw.declared_length = float(rec.number("LONGUEUR"))
     if raw.diameter is None and verdict.diameter:
@@ -469,8 +494,14 @@ def _worker(payload):                                            # pragma: no co
                         registry.Entry(*ent))
 
 
-def run(sources, out_dir, options: Options | None = None, on_file=None) -> Campaign:
-    """Lance une campagne. `on_file(i, total, LftResult)` suit l'avancement."""
+def run(sources, out_dir, options: Options | None = None, on_file=None,
+        cancel=None) -> Campaign:
+    """Lance une campagne.
+
+    `on_file(i, total, LftResult)` suit l'avancement, `cancel()` permet de
+    l'interrompre proprement entre deux fichiers : une campagne de plusieurs
+    heures doit pouvoir etre arretee sans perdre ce qui est deja ecrit.
+    """
     options = options or Options()
     out_root = Path(out_dir).expanduser()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -497,8 +528,12 @@ def run(sources, out_dir, options: Options | None = None, on_file=None) -> Campa
                 campaign.files.append(res)
                 if on_file:
                     on_file(i, total, res)
+                if cancel and cancel():
+                    break
     else:
         for i, f in enumerate(files, start=1):
+            if cancel and cancel():
+                break
             res = process_file(f, out_root, options, reg.resolve(f))
             campaign.files.append(res)
             if on_file:
@@ -527,7 +562,8 @@ def _write_journal(path: Path, campaign: Campaign, reg: registry.Registry) -> No
         f"fichiers LFT lus      : {s['fichiers']}"
         f"   (sautés : {s['fichiers_sautes']}, en erreur : {s['fichiers_en_erreur']})",
         f"pièces rencontrées    : {s['pieces']}",
-        f"pièces traitées       : {s['traitees']}",
+        f"pièces cintrées       : {s['traitees']}",
+        f"tubes droits          : {s['tubes_droits']}",
         f"pièces hors périmètre : {s['exclues']}",
         f"plans PDF écrits      : {s['plans']}",
         f"modèles 3D écrits     : {s['modeles_3d']}",
@@ -635,7 +671,8 @@ def write_index(path, campaign: Campaign, reg: registry.Registry | None = None):
         ("", ""),
         ("Fichiers LFT lus", s["fichiers"]), ("Fichiers sautés", s["fichiers_sautes"]),
         ("Fichiers en erreur", s["fichiers_en_erreur"]),
-        ("Pièces rencontrées", s["pieces"]), ("Pièces traitées", s["traitees"]),
+        ("Pièces rencontrées", s["pieces"]), ("Pièces cintrées", s["traitees"]),
+        ("Tubes droits", s["tubes_droits"]),
         ("Pièces hors périmètre", s["exclues"]),
         ("Plans PDF", s["plans"]), ("Modèles 3D", s["modeles_3d"]),
         ("", ""), ("Motifs d'exclusion", ""),

@@ -818,15 +818,129 @@ $('#doExport').onclick = async (e) => {
       body: JSON.stringify({ uids, dir, formats }),
     });
     const msg = `${res.written.length} fichier(s) écrit(s) dans ${res.dir}`;
-    say(res.failed.length ? `${msg} — ${res.failed.length} échec(s) : `
-        + res.failed.map((f) => f.ref).join(', ') : msg,
-        res.failed.length ? 'err' : 'ok');
+    if (!res.failed.length) { say(msg, 'ok'); return; }
+    // Une liste de repères ne dit pas quoi corriger : on affiche la cause,
+    // regroupée, et le détail complet part dans la console.
+    const top = (res.reasons || [])[0];
+    const cause = top ? ` — ${top.count} échec(s) : ${top.error}` : '';
+    say(`${msg}${cause}`, 'err');
+    console.warn('Échecs d\'export :', res.reasons || res.failed);
   } catch (err) {
     say(err.message, 'err');
   } finally {
     busy(false);
   }
 };
+
+
+/* ─────────────────────────────────────────── sélecteur de dossier natif
+
+   Le navigateur ne donne jamais le chemin réel d'un dossier. Le serveur
+   tourne en local : il ouvre donc la fenêtre du système et nous rend le
+   chemin choisi. Si Tk manque sur le poste, on le dit et le champ texte
+   reste utilisable. */
+async function pickPath(kind, title, initial) {
+  const r = await api('/api/pick', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, title, initial }),
+  });
+  return r.cancelled ? null : (r.path || null);
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button.pick');
+  if (!btn) return;
+  ev.preventDefault();
+  const field = $(`#${btn.dataset.target}`);
+  btn.disabled = true;
+  try {
+    const p = await pickPath(btn.dataset.kind || 'folder',
+                             btn.dataset.title || 'Choisir', field.value.trim());
+    if (p) field.value = p;
+  } catch (err) {
+    say(err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ──────────────────────────────────────────────────────────── campagne */
+
+let batchTimer = null;
+
+$('#openBatch').onclick = () => {
+  $('#batchDlg').showModal();
+  refreshBatch();
+};
+
+$('#batchStart').onclick = async (e) => {
+  e.preventDefault();
+  const body = {
+    source: $('#batchSource').value.trim(),
+    output: $('#batchOut').value.trim(),
+    repertoire: $('#batchReg').value.trim(),
+    plans: $('#bPlans').checked,
+    booklet: $('#bBooklet').checked,
+    models: $('#bModels').checked,
+    dxf: $('#bDxf').checked,
+    force: $('#bForce').checked,
+    formats: ['step'].concat($('#bStl').checked ? ['stl'] : []),
+    limit: Number($('#bLimit').value) || null,
+    workers: Number($('#bWorkers').value) || 1,
+  };
+  if (!body.source || !body.output) {
+    say('Indiquez le dossier des LFT et le dossier de sortie.', 'err');
+    return;
+  }
+  try {
+    await api('/api/batch/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    startBatchPolling();
+  } catch (err) {
+    say(err.message, 'err');
+  }
+};
+
+$('#batchStop').onclick = async (e) => {
+  e.preventDefault();
+  try { await api('/api/batch/stop', { method: 'POST' }); } catch (err) { /* rien */ }
+};
+
+function startBatchPolling() {
+  if (batchTimer) clearInterval(batchTimer);
+  batchTimer = setInterval(refreshBatch, 900);
+  refreshBatch();
+}
+
+async function refreshBatch() {
+  let st;
+  try { st = await api('/api/batch/status'); } catch (err) { return; }
+  const box = $('#batchProgress');
+  const started = st.total > 0;
+  box.hidden = !started;
+  $('#batchStart').disabled = st.running;
+  $('#batchStop').hidden = !st.running;
+
+  const pct = st.total ? Math.round((st.done / st.total) * 100) : 0;
+  $('#pbarFill').style.width = `${pct}%`;
+  const sum = st.summary || {};
+  const bilan = sum.pieces != null
+    ? ` — ${sum.pieces} pièce(s) : ${sum.traitees} cintrée(s), `
+      + `${sum.tubes_droits || 0} droite(s), ${sum.exclues} hors périmètre · `
+      + `${sum.plans} plan(s), ${sum.modeles_3d} modèle(s)`
+    : '';
+  $('#batchState').textContent = st.error
+    ? `Échec : ${st.error}`
+    : `${st.done}/${st.total} fichier(s)${st.running ? ` — ${st.current}` : ''}`
+      + `${st.cancelling && st.running ? ' — arrêt demandé' : ''}${bilan}`
+      + (!st.running && st.index ? ` · index : ${st.index}` : '');
+  $('#batchLog').textContent = (st.lines || []).join('\n');
+  $('#batchLog').scrollTop = $('#batchLog').scrollHeight;
+
+  if (!st.running && batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+}
 
 /* ───────────────────────────────────────────────────────────── démarrage */
 

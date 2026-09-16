@@ -273,8 +273,8 @@ def test_perimetre_progcrippa():
     from tubeiso.parsers import crippa
 
     class Rec:
-        def __init__(self, code, iso="", droit=False, main=False):
-            self.cells = {"CODE_MAT": code}
+        def __init__(self, code, iso="", droit=False, main=False, longueur=None):
+            self.cells = {"CODE_MAT": code, "LONGUEUR": longueur}
             self.iso = iso
             self.straight = droit
             self.handmade = main
@@ -282,16 +282,22 @@ def test_perimetre_progcrippa():
         def get(self, col, default=None):
             return self.cells.get(col, default)
 
+        def number(self, col):
+            v = self.cells.get(col)
+            return float(v) if isinstance(v, (int, float)) else None
+
     v = scope.evaluate(Rec("769-421-035", PROG))
     assert not v.ok and v.reason == scope.MATIERE_SOUPLE
 
+    # sans programme ET sans longueur, il n'y a rien a modeliser
     v = scope.evaluate(Rec("293-421-006", ""))
-    assert not v.ok and v.reason == scope.SANS_PROGRAMME
+    assert not v.ok and v.reason == scope.LONGUEUR_ABSENTE
 
-    v = scope.evaluate(Rec("293-421-006", "", droit=True))
-    assert not v.ok and v.reason == scope.TUBE_DROIT
+    # sans programme mais avec une longueur : tube droit, donc traite
+    v = scope.evaluate(Rec("293-421-006", "", droit=True, longueur=300))
+    assert v.ok and v.straight and v.reason == scope.TUBE_DROIT
 
-    v = scope.evaluate(Rec("293-421-006", "", main=True))
+    v = scope.evaluate(Rec("293-421-006", "", main=True, longueur=300))
     assert not v.ok and v.reason == scope.FAIT_MAIN
 
     raw = crippa.parse(PROG)
@@ -475,17 +481,22 @@ def test_campagne_range_et_indexe():
         out = Path(tmp) / "biblio"
         campagne = batch.run([src], out, batch.Options(models=False))
         s = campagne.summary()
-        assert s["pieces"] == 3 and s["traitees"] == 1 and s["exclues"] == 2
-        assert s["plans"] == 1
+        # 412 est cintre, 901 est un tube droit rigide, 900 est un flexible
+        assert s["pieces"] == 3
+        assert s["traitees"] == 1 and s["tubes_droits"] == 1 and s["exclues"] == 1
+        assert s["plans"] == 2
 
         lot = out / "BSH" / "ESSAI_0001" / "BCH_ESSAI_0001_0792-0002-JV"
-        assert (lot / "plans" / "412.pdf").exists()
-        assert (lot / "donnees" / "412.json").exists()
-        assert (lot / "BCH_ESSAI_0001_0792-0002-JV_cahier.pdf").exists()
-        assert not (lot / "plans" / "900.pdf").exists(), \
+        base = "BCH_ESSAI_0001_0792-0002-JV"
+        assert (lot / "plans" / f"{base}_412.pdf").exists()
+        assert (lot / "plans" / f"{base}_901.pdf").exists(), "le tube droit a un plan"
+        assert (lot / "donnees" / f"{base}_412.json").exists()
+        assert (lot / f"{base}_cahier.pdf").exists()
+        assert not (lot / "plans" / f"{base}_900.pdf").exists(), \
             "un tuyau souple ne doit produire aucun plan"
 
-        donnees = json.loads((lot / "donnees" / "412.json").read_text("utf-8"))
+        donnees = json.loads(
+            (lot / "donnees" / f"{base}_412.json").read_text("utf-8"))
         assert donnees["matiere"]["nature"] == "rigide"
         assert donnees["cintrage"]["lra"][0]["r15_programme"] == 46
         assert len(donnees["geometrie"]["sommets_xyz"]) == tube_sommets(donnees)
@@ -495,7 +506,9 @@ def test_campagne_range_et_indexe():
         assert index["Tubes"].max_row == 4          # en-tete + 3 pieces
         motifs = {index["Tubes"].cell(row=r, column=9).value
                   for r in range(2, 5)}
-        assert "matière_souple" in motifs and "tube_droit_sans_programme" in motifs
+        assert "matière_souple" in motifs
+        statuts = {index["Tubes"].cell(row=r, column=8).value for r in range(2, 5)}
+        assert statuts == {"traitée", "tube droit", "exclue"}
 
         # reprise : la meme campagne relancee ne refait rien
         again = batch.run([src], out, batch.Options(models=False))
@@ -504,6 +517,130 @@ def test_campagne_range_et_indexe():
 
 def tube_sommets(donnees: dict) -> int:
     return len(donnees["cintrage"]["lra"]) + 2
+
+
+# ------------------------------------------------- v6.1 : PDF sans dependance
+
+def test_pdf_ecrit_sans_bibliotheque():
+    """Le PDF ne doit dependre que de la bibliotheque standard.
+
+    La premiere version passait par reportlab, et l'export tombait en panne sur
+    tout poste ou il n'etait pas installe. Ce test verrouille la sortie : entete,
+    pagination, table des objets, et metriques de police exactes.
+    """
+    import tempfile
+
+    from tubeiso import sheet
+
+    source = Path(sheet.__file__).read_text(encoding="utf-8")
+    assert "import reportlab" not in source and "from reportlab" not in source
+
+    # metriques Adobe officielles : un texte cale a droite en depend
+    assert abs(sheet.text_width("Ø8 × 1 mm", "Helvetica", 10) - 49.74) < 0.01
+    assert abs(sheet.text_width("ABC", "Helvetica-Bold", 12) - 25.992) < 0.01
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "essai.pdf"
+        s = sheet.PdfSheet(out, title="Essai — accentué")
+        s.rect(10, 10, 100, 50)
+        s.text(20, 30, "Ø18 × 2 mm — cintrage à 92,5°", 4.0)
+        s.polyline([(10, 60), (50, 80), (90, 60)], w=0.5)
+        s.circle(60, 40, 5, fill="#EEEEEE")
+        s.page_break()
+        s.text(20, 20, "page 2", 4.0)
+        s.save()
+        blob = out.read_bytes()
+
+    assert blob.startswith(b"%PDF-1.4")
+    assert blob.rstrip().endswith(b"%%EOF")
+    assert blob.count(b"/Type /Page ") == 2, "deux pages attendues"
+    assert b"/Type /Pages" in blob and b"/Type /Catalog" in blob
+    assert b"xref" in blob and b"startxref" in blob
+    assert b"/FlateDecode" in blob, "les flux doivent etre compresses"
+
+    # la table xref doit pointer sur de vrais objets
+    tail = blob[blob.rindex(b"startxref"):]
+    start = int(tail.split(b"\n")[1])
+    assert blob[start:start + 4] == b"xref"
+
+
+def test_largeur_de_texte_identique_svg_et_pdf():
+    """Les deux sorties doivent tronquer au meme endroit, sinon l'apercu ment."""
+    from tubeiso import sheet
+    svg = sheet.SvgSheet()
+    for txt, bold in (("Ø8 × 1 mm", False), ("MASTERFLEX_HD_EXPERFLEX", True),
+                      ("92,5°", False)):
+        a = svg.width_of(txt, 2.5, bold)
+        b = sheet.text_width(txt, "Helvetica-Bold" if bold else "Helvetica",
+                             2.5 * sheet.PT_PER_MM) * sheet.MM_PER_PT
+        assert abs(a - b) < 1e-9
+
+
+# --------------------------------------------- v6.1 : tubes droits exportables
+
+def test_tube_rigide_sans_programme_est_traite():
+    """[Info Crippa] « meme s'il n'y a pas de programme, il faut generer la 3D
+    avec uniquement la longueur et le diametre »."""
+    from tubeiso import materials, scope
+
+    class Rec:
+        def __init__(self, code, longueur, droit=False, main=False, iso=""):
+            self.cells = {"CODE_MAT": code, "LONGUEUR": longueur}
+            self.iso, self.straight, self.handmade = iso, droit, main
+
+        def get(self, col, default=None):
+            return self.cells.get(col, default)
+
+        def number(self, col):
+            v = self.cells.get(col)
+            return float(v) if isinstance(v, (int, float)) else None
+
+    v = scope.evaluate(Rec("293-421-008", 640, droit=True))
+    assert v.ok and v.straight and v.status == scope.DROIT and v.diameter == 8
+
+    # sans longueur, il n'y a rien a modeliser
+    v = scope.evaluate(Rec("293-421-008", None, droit=True))
+    assert not v.ok and v.reason == scope.LONGUEUR_ABSENTE
+
+    # un souple reste exclu, meme droit
+    v = scope.evaluate(Rec("769-421-035", 5000, droit=True))
+    assert not v.ok and v.reason == scope.MATIERE_SOUPLE
+
+    # un rigide hors outillage aussi
+    v = scope.evaluate(Rec("293-421-028", 900, droit=True))
+    assert not v.ok and v.reason == scope.HORS_OUTILLAGE
+
+
+def test_plan_d_un_tube_droit():
+    import tempfile
+
+    from tubeiso import conventions, geometry, render, validate
+    from tubeiso.model import Tooling
+
+    tooling = Tooling(name="Ø15", diameter=15, clr=45, wall=1.5, elongation=4.0)
+    tube = conventions.get("bsa").build_straight("100", 908.0, 15, tooling)
+    cl = geometry.build(tube)
+    assert abs(cl.developed - 908.0) < 1e-9
+    data = render.PlanData(tube=tube, centerline=cl, tooling=tooling,
+                           issues=validate.check(tube, tooling, cl),
+                           lft="FLX_ESSAI_0000-0000-XX")
+    svg = render.to_svg(data)
+    assert "TUBE DROIT" in svg and "sans objet" in svg
+    with tempfile.TemporaryDirectory() as tmp:
+        assert render.to_pdf(data, Path(tmp) / "d.pdf").read_bytes().startswith(b"%PDF")
+
+
+# ------------------------------------------------ v6.1 : nommage des exports
+
+def test_nom_de_fichier_tracable():
+    from tubeiso import registry
+    assert registry.output_basename(
+        "BCH_PLATINE_82_0889_0877-0000-CL.xlsx", "170"
+    ) == "BCH_PLATINE_82_0889_0877-0000-CL_170"
+    assert registry.output_basename("BCH_X_0001-0000-AA", "105.1") == \
+        "BCH_X_0001-0000-AA_105.1"
+    assert registry.output_basename("", "42") == "42"
+    assert registry.output_basename("LFT", "a/b:c") == "LFT_a_b_c"
 
 
 def _run() -> int:

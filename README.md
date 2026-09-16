@@ -267,11 +267,28 @@ Le même dessin sort en SVG pour l'aperçu de l'application et en PDF pour la
 sous-traitance : `sheet.py` expose une surface de dessin commune, et la mise en
 plan est écrite une seule fois. Aucune cote ne peut diverger entre les deux.
 
+**Le PDF est écrit par `sheet.py`, sans aucune bibliothèque.** Une version
+antérieure passait par reportlab, et l'export tombait en panne sur tout poste
+où ce paquet n'était pas installé — c'est-à-dire sur l'exécutable distribué,
+où l'utilisateur voyait « 0 fichier écrit, 95 échecs » sans explication. Un
+plan qui ne sort pas est un plan qui n'existe pas : la dépendance a été
+supprimée. Le fichier produit est un PDF 1.4 minimal — catalogue, pages, flux
+compressé, les trois polices standard — et les métriques Adobe sont embarquées
+pour que le texte calé à droite tombe au bon endroit.
+
 Une pièce dont un contrôle est en erreur reçoit un **bandeau rouge en haut de
 la page 1** qui nomme l'anomalie, en plus de la mention dans le cartouche.
 `batch` trace le plan quand même — il est souvent la meilleure façon de
 comprendre ce qui cloche — mais il est impossible de le confondre avec un plan
 bon. `plan`, en usage manuel, refuse au contraire de tracer, sauf `--force`.
+
+### Le nom des fichiers
+
+Un fichier exporté doit dire d'où il vient. Un `170.stp` isolé dans un dossier
+de sous-traitance ne se rattache à rien, alors que
+`BCH_PLATINE_82_0889_0877-0000-CL_170.stp` porte sa LFT et son repère sans
+qu'on ait besoin de l'ouvrir. Toutes les sorties — plan, modèle, données —
+suivent la règle `<nom du fichier LFT>_<repère>.<extension>`.
 
 `plan` et `batch` produisent en plus un **cahier par LFT** : une couverture qui
 récapitule le lot, puis tous les plans à la suite. C'est ce qu'on imprime pour
@@ -300,12 +317,26 @@ Les Ø22 à Ø38 existent en Ermeto mais BSA ne les cintre plus : ils sont donc
 rigides et hors périmètre, ce que l'application distingue explicitement d'un
 tuyau souple.
 
-## Le périmètre : seulement ce qui a une PROGCRIPPA
+## Le périmètre
 
-Une pièce sans programme n'a pas de géométrie. En fabriquer une quand même
-revient à livrer un modèle inventé, ce qui est plus dangereux qu'un modèle
-absent. `scope.py` tranche avant tout calcul, et chaque exclusion porte un
-motif stable :
+Trois sorts possibles, et c'est `scope.py` qui tranche avant tout calcul :
+
+| Statut | Ce que c'est | Ce qui est produit |
+|---|---|---|
+| **traitée** | programme Crippa complet | plan coté + modèle 3D |
+| **tube droit** | rigide, pas de programme, longueur et Ø connus | plan de débit + modèle 3D |
+| **exclue** | tout le reste | rien, et le motif est tracé |
+
+Le tube droit suit la consigne BSA : « même s'il n'y a pas de programme, il
+faut générer la 3D avec uniquement la longueur et le diamètre. » Il n'y a
+aucune géométrie à deviner — une droite et un diamètre suffisent — donc il est
+traité, et son plan porte la mention **TUBE DROIT — AUCUN CINTRAGE**, avec un
+bloc cintrage qui dit « sans objet » plutôt qu'un rayon de matrice qui
+induirait en erreur.
+
+Une pièce vraiment sans géométrie, elle, ne produit rien : en fabriquer une
+quand même reviendrait à livrer un modèle inventé, plus dangereux qu'un modèle
+absent. Chaque exclusion porte un motif stable :
 
 | Motif | Ce qu'il signifie |
 |---|---|
@@ -316,6 +347,7 @@ motif stable :
 | `programme_tronqué` | pas de M30 : géométrie fausse mais plausible |
 | `hors_outillage_crippa` | diamètre rigide sans matrice BSA |
 | `diamètre_introuvable` | ni dans le programme, ni dans CODE_MAT |
+| `longueur_absente` | tube droit sans LONGUEUR : rien à modéliser |
 
 Rien n'est perdu pour autant : les pièces exclues figurent dans l'index, dans
 le récapitulatif du lot et sur la couverture du cahier, avec leur motif. Une
@@ -353,6 +385,11 @@ chaque nom de fichier — à sa machine et à sa description. Sans ce fichier, l
 nom se suffit : `BCH_PLATINE_82_0889_0877-0000-CL` donne le groupe BSH (le
 préfixe de fichier `BCH` désigne le groupe `BSH`), la machine `PLATINE_82_0889`
 et la liste `0877-0000-CL`.
+
+La campagne se lance aussi **depuis l'application**, bouton *Campagne…* :
+dossier des LFT, dossier de sortie, répertoire des machines, et une barre de
+progression qui nomme le fichier en cours. Elle tourne dans un fil séparé et
+peut être arrêtée sans perdre ce qui est déjà écrit.
 
 `INDEX.xlsx` porte trois onglets — *Tubes*, *LFT*, *Campagne* — et vingt-cinq
 colonnes par tube, dont les chemins cliquables vers le plan, le modèle et le

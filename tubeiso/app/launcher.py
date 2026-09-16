@@ -72,6 +72,52 @@ def open_window(url: str, mode: str) -> bool:
     return False
 
 
+def _pick(argv: list[str]) -> int:
+    """Ouvre le selecteur de fichiers du systeme et ecrit le chemin choisi.
+
+    Le navigateur ne donne jamais le chemin reel d'un fichier ni d'un dossier :
+    c'est une protection de confidentialite incontournable. On passe donc par
+    une fenetre native, lancee dans un processus separe — Tk exige le thread
+    principal, ce que le serveur Flask n'a pas a lui offrir.
+
+    L'executable empaquete se relance lui-meme avec ce drapeau ; depuis les
+    sources, c'est `python -m tubeiso.app --pick-folder`.
+    """
+    mode = argv[0]
+    title = "Choisir un dossier" if mode == "--pick-folder" else "Choisir un fichier"
+    initial = ""
+    for i, a in enumerate(argv[1:], start=1):
+        if a == "--title" and i + 1 < len(argv):
+            title = argv[i + 1]
+        elif a == "--initial" and i + 1 < len(argv):
+            initial = argv[i + 1]
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:                                     # pragma: no cover
+        print(f"selecteur indisponible : {exc}", file=sys.stderr)
+        return 2
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        if mode == "--pick-folder":
+            path = filedialog.askdirectory(title=title, initialdir=initial or None,
+                                           mustexist=True)
+        else:
+            path = filedialog.askopenfilename(
+                title=title, initialdir=initial or None,
+                filetypes=[("Fichiers LFT et modeles", "*.xlsx *.xlsm *.stp *.step"),
+                           ("Tous les fichiers", "*.*")])
+    finally:
+        with contextlib.suppress(Exception):
+            root.destroy()
+    if not path:
+        return 1
+    print(path)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # L'executable empaquete est le seul point d'entree distribue : il doit
     # donc aussi donner acces a la ligne de commande, sinon le traitement par
@@ -81,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv_list and argv_list[0] in ("--cli", "cli"):
         from ..cli import main as cli_main
         return cli_main(argv_list[1:])
+    if argv_list and argv_list[0] in ("--pick-folder", "--pick-file"):
+        return _pick(argv_list)
 
     p = argparse.ArgumentParser(
         prog="tubeiso-app", description="Interface graphique tubeiso")

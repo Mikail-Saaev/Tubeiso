@@ -191,8 +191,19 @@ pour déplacer. Les boutons `Iso` `X` `Y` `Z` cadrent sur une vue standard,
 distance affichée est calculée entre les coordonnées exactes, pas entre deux
 sommets de triangle.
 
-**Exporter.** `Exporter la pièce` ou `Tout exporter`, puis choisissez le
-dossier et les formats.
+**Exporter.** `Exporter la pièce` ou `Tout exporter`, puis **`Parcourir…`**
+pour choisir le dossier de destination — la fenêtre du système s'ouvre — et
+cochez les formats : STEP, STL, BREP, plan PDF, plan SVG, DXF. Les fichiers
+sont nommés `<nom du LFT>_<repère>.<extension>`, par exemple
+`BCH_PLATINE_82_0889_0877-0000-CL_170.pdf`, pour se rattacher à leur source
+sans qu'on ait à les ouvrir.
+
+**Traiter des milliers de LFT.** Le bouton `Campagne…` ouvre la même chose que
+la commande `batch` : vous désignez le dossier des LFT, le dossier de sortie et
+— facultativement — `Repertoire_Machines_Consolide.xlsm`, et la barre de
+progression nomme le fichier en cours. La campagne peut être arrêtée à tout
+moment : ce qui est écrit reste écrit, et une relance reprend où elle s'est
+arrêtée.
 
 **Simuler le cintrage.** Le bouton `Simuler` rejoue la fabrication de la
 pièce : le tube part droit, à sa longueur développée, puis chaque coude se
@@ -236,8 +247,14 @@ sur la Crippa ; `tube_droit_sans_programme` un tube laissé droit ;
 `programme_tronqué` un export Excel qui a coupé le champ texte à 255
 caractères — là, le problème est dans la chaîne d'export, pas dans l'outil.
 
-**Le plan PDF ne se génère pas** — `pip install reportlab`. Le PDF est la
-seule fonction qui en dépend ; tout le reste tourne sans.
+**Le bouton `Parcourir…` ne fait rien** — la fenêtre de sélection s'appuie sur
+Tk, absent de certaines installations Python minimales. Le message vous le dit,
+et le champ texte reste utilisable : collez-y le chemin. L'exécutable
+distribué, lui, embarque Tk.
+
+**Une campagne est déjà en cours** — une seule à la fois, sinon deux
+traitements écriraient dans la même arborescence. Attendez la fin ou cliquez
+`Arrêter`.
 
 **`balayage impossible`** — un segment droit est plus court que le rayon de
 cintrage, ou deux coudes se suivent sans droite entre eux. Le message nomme la

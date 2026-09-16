@@ -61,18 +61,14 @@ hiddenimports = extra_hidden + [
     "cadquery", "cadquery.occ_impl.shapes", "cadquery.occ_impl.exporters",
     "cadquery.occ_impl.exporters.assembly", "cadquery.occ_impl.assembly",
     "ezdxf", "openpyxl", "numpy", "flask", "jinja2", "werkzeug",
-    "reportlab", "reportlab.pdfgen", "reportlab.pdfgen.canvas",
-    "reportlab.pdfbase", "reportlab.pdfbase.pdfmetrics", "reportlab.lib.colors",
+    # Selecteur de dossier natif : l'executable se relance avec --pick-folder.
+    "tkinter", "tkinter.filedialog",
     "tubeiso", "tubeiso.app", "tubeiso.app.server", "tubeiso.app.launcher",
     "tubeiso.batch", "tubeiso.materials", "tubeiso.registry", "tubeiso.scope",
     "tubeiso.sheet", "tubeiso.parsers", "tubeiso.parsers.crippa",
 ]
 
-# reportlab embarque ses metriques de polices et ses ressources dans le paquet.
-try:
-    datas += collect_data_files("reportlab")
-except Exception:
-    pass
+
 
 # cadquery tire par defaut un rendu VTK, un compilateur JIT et un solveur
 # d'optimisation dont l'application ne se sert jamais : elle n'utilise que le
@@ -88,9 +84,12 @@ except Exception:
 #   nlopt        importe par le solveur de contraintes de cadquery au chargement
 #   casadi       idem
 #   multimethod  utilise par la repartition de types de cadquery
+# ATTENTION : tkinter n'est PAS exclu. Il servait a matplotlib, qui est parti,
+# mais il porte maintenant le selecteur de dossier natif (--pick-folder).
+# L'exclure ferait echouer le bouton « Parcourir… » dans l'executable.
 excludes = [
     "llvmlite", "numba", "scipy", "matplotlib", "pandas", "PIL",
-    "tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",
+    "PyQt5", "PyQt6", "PySide2", "PySide6",
     "IPython", "ipykernel", "notebook", "jupyter", "pytest", "sphinx",
     "typish", "sqlalchemy",
 ]

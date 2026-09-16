@@ -3,9 +3,9 @@ openpyxl>=3.1
 ezdxf>=1.1
 flask>=3.0
 
-# Generation des plans PDF vectoriels. Pur Python, aucune bibliotheque native :
-# c'est ce qui permet d'empaqueter l'executable sans dependance systeme.
-reportlab>=4.0
+# Le plan PDF est ecrit par tubeiso lui-meme (tubeiso/sheet.py), sans aucune
+# bibliotheque : l'export ne peut donc pas tomber en panne pour une dependance
+# manquante sur un poste. Rien a installer.
 
 # Noyau CAO OpenCascade. Version verrouillee : c'est celle avec laquelle toute
 # la chaine a ete validee (balayage, exports STEP/STL/BREP, lecture STEP,

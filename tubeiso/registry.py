@@ -141,5 +141,18 @@ def safe_name(value: object, default: str = "SANS_NOM", maxlen: int = 80) -> str
     return s or default
 
 
+def output_basename(lft_code: object, repere: object) -> str:
+    """Nom de fichier de sortie : <nom du LFT>_<repere>.
+
+    Le fichier exporte doit dire d'ou il vient. Un `170.stp` isole dans un
+    dossier de sous-traitance ne se rattache a rien ; un
+    `BCH_PLATINE_82_0889_0877-0000-CL_170.stp` se rattache a sa LFT et a son
+    repere sans ouvrir quoi que ce soit.
+    """
+    stem = safe_name(Path(str(lft_code or "")).stem, default="")
+    rep = safe_name(repere, default="sans_repere")
+    return f"{stem}_{rep}" if stem else rep
+
+
 __all__ = ["Registry", "Entry", "parse_filename", "list_number_from", "safe_name",
-           "PREFIX_TO_GROUP"]
+           "output_basename", "PREFIX_TO_GROUP"]

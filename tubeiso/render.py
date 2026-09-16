@@ -209,7 +209,9 @@ def layout(cl: Centerline, box, diameter: float, azimuth: float | None = None,
     span = np.maximum(hi - lo, 1e-6)
     x0, y0, x1, y1 = box
     avail = np.array([max(x1 - x0 - 2 * margin, 5.0), max(y1 - y0 - 2 * margin, 5.0)])
-    scale = float(min(avail / span))
+    # Un tube droit a une etendue nulle dans deux directions : sans plafond,
+    # l'echelle partirait a l'infini et la vue afficherait un pate.
+    scale = min(float(min(avail / span)), 10.0)
     centre = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
     return Layout(scale, centre - (lo + hi) / 2 * scale, az, plane)
 
@@ -274,7 +276,7 @@ def _block(s: sh.Sheet, box, title: str) -> float:
 def _draw_curve(s: sh.Sheet, lay: Layout, cl: Centerline, diameter: float,
                 thin: bool = False) -> np.ndarray:
     pts = lay.to_paper(cl.points)
-    body_w = max(0.7, diameter * lay.scale)
+    body_w = min(max(0.7, diameter * lay.scale), 6.0)
     s.polyline(pts, w=body_w, colour=sh.BODY)
     s.polyline(pts, w=sh.W_HAIR if thin else 0.4, colour=sh.INK)
     return pts
@@ -354,7 +356,9 @@ def _draw_iso(s: sh.Sheet, d: PlanData, azimuth: float | None) -> Layout:
 
     # --- encombrement et echelle
     env = cl.envelope
-    s.text(x1 - 2, y0 + 4.5, f"VUE ISOMÉTRIQUE  ·  échelle {lay.label}", 2.5,
+    titre = ("TUBE DROIT — AUCUN CINTRAGE" if not tube.bends
+             else "VUE ISOMÉTRIQUE")
+    s.text(x1 - 2, y0 + 4.5, f"{titre}  ·  échelle {lay.label}", 2.5,
            anchor="end", bold=True, colour=sh.BLUE)
     s.text(x1 - 2, y1 - 2.5,
            f"encombrement {env[0]:.0f} × {env[1]:.0f} × {env[2]:.0f} mm", 2.3,
@@ -420,15 +424,26 @@ def _draw_data_column(s: sh.Sheet, d: PlanData) -> None:
     ])
 
     total = sum(b.angle for b in tube.bends)
-    top = rows_block(top, "Cintrage", [
-        ("Rayon de fibre neutre Rm", f"{tl.clr:g} mm" if tl.clr else "—"),
-        ("Nombre de coudes", str(tube.n_bends)),
-        ("Somme des angles", f"{total:g}°"),
-        ("Rotation B positive", "horaire vue de l'aval"
-         if d.handedness >= 0 else "antihoraire vue de l'aval"),
-        ("Faux pli à 0°", f"{len(tube.false_bends)} fusionné(s)"
-         if tube.false_bends else "aucun"),
-    ])
+    if tube.bends:
+        cintrage = [
+            ("Rayon de fibre neutre Rm", f"{tl.clr:g} mm" if tl.clr else "—"),
+            ("Nombre de coudes", str(tube.n_bends)),
+            ("Somme des angles", f"{total:g}°"),
+            ("Rotation B positive", "horaire vue de l'aval"
+             if d.handedness >= 0 else "antihoraire vue de l'aval"),
+            ("Faux pli à 0°", f"{len(tube.false_bends)} fusionné(s)"
+             if tube.false_bends else "aucun"),
+        ]
+    else:
+        # Aucun coude : afficher un rayon de matrice induirait en erreur.
+        cintrage = [
+            ("Nombre de coudes", "aucun"),
+            ("Opération", "débit droit, sans cintrage"),
+            ("Rayon de cintrage", "sans objet"),
+            ("Rotation B", "sans objet"),
+            ("Origine des cotes", "colonne LONGUEUR de la LFT"),
+        ]
+    top = rows_block(top, "Cintrage", cintrage)
 
     l1, _ = fitting_label(d.embout_1, d.diameter)
     l2, _ = fitting_label(d.embout_2, d.diameter)
@@ -443,8 +458,9 @@ def _draw_title_block(s: sh.Sheet, d: PlanData, lay: Layout, page: int,
     s.rect(x0, y0, x1, y1, w=sh.W_OUTLINE, colour=sh.INK)
     s.rect(x0, y0, x1, y0 + 10.0, w=sh.W_OUTLINE, colour=sh.INK, fill="#EEF3F6")
     s.text(x0 + 2.5, y0 + 4.6, "PLAN DE FABRICATION", 2.9, bold=True)
-    s.text(x0 + 2.5, y0 + 8.4,
-           f"Tube cintré — Crippa Mastercut · {d.drawn_on}", 2.1, colour=sh.GREY)
+    nature = "Tube droit — débit seul" if not d.tube.bends else \
+        "Tube cintré — Crippa Mastercut"
+    s.text(x0 + 2.5, y0 + 8.4, f"{nature} · {d.drawn_on}", 2.1, colour=sh.GREY)
 
     # --- repere, en gros
     s.text(x0 + 2.5, y0 + 14.4, "REPÈRE", 2.2, colour=sh.GREY)
@@ -502,6 +518,10 @@ def _lra_rows(d: PlanData) -> list[list[str]]:
     tube, cl = d.tube, d.centerline
     rows = [["N°", "Segment L (mm)", "Rotation B (°)", "Angle réel (°)",
              "R15 programmé", "Rayon Rm", "Cumul développé"]]
+    if not tube.bends:
+        L = sum(tube.straights)
+        rows.append(["—", f"{L:.1f}", "—", "—", "—", "—", f"{L:.1f}"])
+        return rows
     cumul = 0.0
     for i, b in enumerate(tube.bends):
         L = tube.straights[i] if i < len(tube.straights) else float("nan")
@@ -584,11 +604,13 @@ def _draw_ends_block(s: sh.Sheet, d: PlanData, box) -> None:
         s.text(x0 + 30, y, f"profondeur d'emmanchement {ermeto}", 2.05)
         y += 3.8
     if y < y1 - 7:
+        n = len(d.tube.straights)
+        ou = "la longueur L1" if n <= 1 else f"les longueurs L1 et L{n}"
         for line in sh.wrap(
-                s, "Vérifier la profondeur d'emmanchement avant de couper : elle "
-                   "est comprise dans les longueurs L1 et L" + str(len(d.tube.straights))
-                   + " du tableau LRA. Tolérances de fabrication à convenir avec le "
-                     "donneur d'ordre : la documentation BSA n'en fixe pas.",
+                s, f"Vérifier la profondeur d'emmanchement avant de couper : elle "
+                   f"est comprise dans {ou} du tableau LRA. Tolérances de "
+                   f"fabrication à convenir avec le donneur d'ordre : la "
+                   f"documentation BSA n'en fixe pas.",
                 width, 2.0, limit=3):
             if y > y1 - 2.5:
                 break
@@ -597,6 +619,20 @@ def _draw_ends_block(s: sh.Sheet, d: PlanData, box) -> None:
     if d.remarque and y < y1 - 3:
         s.text(x0 + 2.5, y, sh.ellipsis(s, f"Remarque LFT : {d.remarque}", width,
                                         2.05), 2.05, colour=sh.BLUE)
+
+
+# Un tube droit n'a ni angle, ni rotation, ni rayon : lui servir les notes du
+# cintrage ferait douter de tout le reste de la feuille.
+NOTES_DROIT = [
+    "Pièce débitée droite, sans cintrage. La cote unique est la longueur totale "
+    "du tube fini, extrémités comprises.",
+    "Cote relevée au demi-millimètre, conformément à la méthode de mesure BSA.",
+    "La longueur provient de la colonne LONGUEUR de la LFT : elle fait foi, il "
+    "n'y a pas de programme machine pour la recouper.",
+    "Le repère du dessin est celui du tube : origine au point A, axe suivant +X.",
+    "Tolérances de fabrication à convenir avec le donneur d'ordre : la "
+    "documentation BSA n'en fixe pas.",
+]
 
 
 def _draw_page2(s: sh.Sheet, d: PlanData, pages: int) -> None:
@@ -641,11 +677,12 @@ def _draw_page2(s: sh.Sheet, d: PlanData, pages: int) -> None:
 
     # --- colonne droite : notes, controles, programme
     rx0, ry0, rx1, ry1 = P2_RIGHT
+    notes = NOTES if d.tube.bends else NOTES_DROIT
     note_h = 12 + 3.4 * sum(len(sh.wrap(s, n, rx1 - rx0 - 8, 2.15)) + 0.4
-                            for n in NOTES)
+                            for n in notes)
     note_h = min(note_h, 92.0)
     y = _block(s, (rx0, ry0, rx1, ry0 + note_h), "Notes de fabrication")
-    for i, note in enumerate(NOTES, start=1):
+    for i, note in enumerate(notes, start=1):
         lines = sh.wrap(s, note, rx1 - rx0 - 9, 2.15)
         s.text(rx0 + 2.5, y, f"{i}.", 2.15, bold=True, colour=sh.BLUE)
         for line in lines:
@@ -673,9 +710,18 @@ def _draw_page2(s: sh.Sheet, d: PlanData, pages: int) -> None:
 
     # --- programme d'origine
     top2 = top + ctrl_h + 3
-    if top2 < ry1 - 14:
+    lines = [ln.strip() for ln in (d.tube.source or "").splitlines() if ln.strip()]
+    if not lines:
+        # Pas de programme : un cadre vide laisserait croire a une donnee perdue.
+        y = _block(s, (rx0, top2, rx1, min(top2 + 22.0, ry1)),
+                   "Programme ISO d'origine")
+        for ln in sh.wrap(s, "Aucun programme Crippa pour cette pièce : elle est "
+                             "débitée droite. Sa cote vient de la colonne LONGUEUR "
+                             "de la LFT.", rx1 - rx0 - 6, 2.15, limit=3):
+            s.text(rx0 + 2.5, y, ln, 2.15, colour=sh.GREY)
+            y += 3.2
+    elif top2 < ry1 - 14:
         y = _block(s, (rx0, top2, rx1, ry1), "Programme ISO d'origine")
-        lines = [ln.strip() for ln in (d.tube.source or "").splitlines() if ln.strip()]
         avail = int((ry1 - y - 2) / 2.9)
         for ln in lines[:avail]:
             s.text(rx0 + 2.5, y, sh.ellipsis(s, ln, rx1 - rx0 - 6, 2.0, mono=True),

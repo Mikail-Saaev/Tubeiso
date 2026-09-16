@@ -20,22 +20,35 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import shutil
 import sys
+import subprocess
 import tempfile
 import threading
+from datetime import datetime
 import traceback
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from .. import (bsa, conventions, geometry, lft, materials, registry, render,
-                scope, solid, stepreader, validate)
+from .. import (batch, bsa, conventions, geometry, lft, materials, registry,
+                render, scope, solid, stepreader, validate)
 from ..config import Config, code_mat_diameter
 from ..parsers import crippa
 
 STATIC = Path(__file__).with_name("static")
+app_log = logging.getLogger("tubeiso")
+
+
+def _group_reasons(failed: list[dict]) -> list[dict]:
+    """Regroupe les echecs par motif : une meme cause se lit une fois."""
+    groups: dict[str, list[str]] = {}
+    for f in failed:
+        groups.setdefault(f.get("error", "?"), []).append(str(f.get("ref", "?")))
+    return [{"error": k, "count": len(v), "refs": v[:12]}
+            for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1]))]
 MESH_CACHE_MAX = 24          # pieces gardees en memoire, maillage compris
 
 
@@ -60,6 +73,99 @@ class Piece:
     @property
     def ref(self) -> str:
         return self.record.rep or self.record.program_number or self.uid
+
+
+class CampaignRunner:
+    """Une campagne lancee depuis l'interface, suivie en direct.
+
+    Le traitement de milliers de LFT ne peut pas bloquer la requete HTTP : il
+    tourne dans un fil separe, et l'interface interroge `state()`. Le fil est
+    unique — deux campagnes simultanees ecriraient dans la meme arborescence.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.cancel = threading.Event()
+        self.reset()
+
+    def reset(self) -> None:
+        self.running = False
+        self.done = 0
+        self.total = 0
+        self.current = ""
+        self.out_dir = ""
+        self.started = ""
+        self.finished = ""
+        self.error = ""
+        self.summary: dict = {}
+        self.lines: list[str] = []
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def start(self, sources, out_dir, options) -> dict:
+        if self.busy:
+            raise RuntimeError("une campagne est déjà en cours")
+        files = batch.discover(sources)
+        if options.limit:
+            files = files[: options.limit]
+        if not files:
+            raise ValueError("aucun fichier .xlsx ou .xlsm trouvé dans ce dossier")
+        self.reset()
+        self.cancel.clear()
+        self.running = True
+        self.total = len(files)
+        self.out_dir = str(out_dir)
+        self.started = datetime.now().isoformat(timespec="seconds")
+        self.thread = threading.Thread(
+            target=self._run, args=(sources, out_dir, options), daemon=True)
+        self.thread.start()
+        return self.state()
+
+    def _run(self, sources, out_dir, options) -> None:
+        def progress(i, total, res):
+            with self.lock:
+                self.done, self.total = i, total
+                self.current = Path(res.source).name
+                state = ("sauté" if res.skipped else
+                         f"ERREUR — {res.incident}" if res.incident else
+                         f"{res.treated} traitée(s), {res.excluded} exclue(s)")
+                self.lines.append(f"{Path(res.source).name} — {state}")
+                del self.lines[:-400]
+
+        try:
+            campaign = batch.run(sources, out_dir, options, on_file=progress,
+                                 cancel=self.cancel.is_set)
+            with self.lock:
+                self.summary = campaign.summary()
+        except Exception as exc:                                 # pragma: no cover
+            logging.getLogger("tubeiso").exception("campagne")
+            with self.lock:
+                self.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            with self.lock:
+                self.running = False
+                self.finished = datetime.now().isoformat(timespec="seconds")
+
+    def stop(self) -> dict:
+        self.cancel.set()
+        return self.state()
+
+    def state(self) -> dict:
+        with self.lock:
+            return {
+                "running": self.running or self.busy,
+                "cancelling": self.cancel.is_set(),
+                "done": self.done, "total": self.total,
+                "current": self.current, "out_dir": self.out_dir,
+                "started": self.started, "finished": self.finished,
+                "error": self.error, "summary": self.summary,
+                "lines": self.lines[-60:],
+                "index": (str(Path(self.out_dir) / "INDEX.xlsx")
+                          if self.out_dir else ""),
+            }
 
 
 class Session:
@@ -113,6 +219,24 @@ class Session:
         raw = crippa.parse(rec.iso, ref=p.ref) if scope.has_program(rec.iso) else None
         p.verdict = scope.evaluate(rec, raw)
         diameter = p.verdict.diameter or code_mat_diameter(rec.get("CODE_MAT"))
+
+        if p.verdict.straight:
+            # Rigide, sans programme : une droite et un diametre suffisent.
+            # [Info Crippa] « meme s'il n'y a pas de programme, il faut generer
+            # la 3D avec uniquement la longueur et le diametre. »
+            tooling = self.config.for_program("", diameter, rec.get("CODE_MAT"))
+            p.raw = raw
+            p.tooling = tooling
+            p.recut = rec.recut
+            p.tube = conv.build_straight(p.ref, float(lft_length or 0.0),
+                                         diameter or tooling.diameter, tooling)
+            p.tube.list_number = rec.list_number
+            p.tube.program_number = rec.program_number
+            p.tube.warnings.extend(rec.warnings)
+            p.issues = validate.check(p.tube, tooling,
+                                      length_tol=self.config.tolerance,
+                                      lft_length=lft_length)
+            return
 
         if not p.verdict.ok:
             # Hors perimetre : on ne fabrique AUCUNE geometrie. Un modele
@@ -349,9 +473,10 @@ class Session:
                 failed.append({"ref": p.ref,
                                "error": f"hors périmètre : {p.verdict.detail}"})
                 continue
-            name = p.ref
-            if self.book and len(self.book.lots) > 1 and p.lot:
-                name = f"{p.lot}_{p.ref}"
+            # Le nom porte la LFT d'origine et le repere : un fichier isole
+            # dans un dossier de sous-traitance doit dire d'ou il vient.
+            name = registry.output_basename(
+                Path(self.source).stem if self.source else "", p.ref)
             try:
                 cl = geometry.build(p.tube, handedness=self.config.handedness)
                 cad = [f for f in formats if f in ("step", "stl", "brep")]
@@ -371,8 +496,13 @@ class Session:
                     render.to_dxf(p.tube, cl, str(out / f"{name}.dxf"))
                     done.append(str(out / f"{name}.dxf"))
             except Exception as exc:
-                failed.append({"ref": p.ref, "error": str(exc)})
-        return {"written": done, "failed": failed, "dir": str(out)}
+                # Le motif est ce qui compte : « 95 echecs » sans raison ne
+                # permet pas de corriger quoi que ce soit.
+                app_log.debug("export %s", p.ref, exc_info=True)
+                failed.append({"ref": p.ref,
+                               "error": f"{type(exc).__name__}: {exc}"})
+        return {"written": done, "failed": failed, "dir": str(out),
+                "reasons": _group_reasons(failed)}
 
 
 def create_app(session: Session | None = None, token: str | None = None) -> Flask:
@@ -383,6 +513,7 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
     app.json.sort_keys = False
     app.config["SESSION"] = session or Session()
     app.config["TOKEN"] = token or secrets.token_urlsafe(16)
+    app.config["CAMPAIGN"] = CampaignRunner()
 
     def api_error(exc: Exception, code: int = 400):
         app.logger.debug(traceback.format_exc())
@@ -542,6 +673,70 @@ def create_app(session: Session | None = None, token: str | None = None) -> Flas
                                     data.get("formats") or ["step"]))
         except Exception as exc:
             return api_error(exc)
+
+    # ------------------------------------------------------ selecteur natif
+    @app.post("/api/pick")
+    def pick():
+        """Ouvre le selecteur du systeme et renvoie le chemin choisi."""
+        data = request.get_json(force=True, silent=True) or {}
+        mode = "--pick-file" if data.get("kind") == "file" else "--pick-folder"
+        title = str(data.get("title") or "")
+        initial = str(data.get("initial") or "")
+        frozen = bool(getattr(sys, "frozen", False))
+        cmd = [sys.executable] if frozen else [sys.executable, "-m", "tubeiso.app"]
+        cmd += [mode]
+        if title:
+            cmd += ["--title", title]
+        if initial:
+            cmd += ["--initial", initial]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except Exception as exc:
+            return api_error(RuntimeError(
+                f"sélecteur de dossier indisponible : {exc}. "
+                "Collez le chemin dans le champ."))
+        if proc.returncode == 2:
+            return api_error(RuntimeError(
+                (proc.stderr or "sélecteur indisponible").strip()
+                + " — collez le chemin dans le champ."))
+        path = (proc.stdout or "").strip().splitlines()
+        return jsonify({"path": path[-1] if path else "",
+                        "cancelled": proc.returncode == 1})
+
+    # ---------------------------------------------------------------- campagne
+    @app.post("/api/batch/start")
+    def batch_start():
+        data = request.get_json(force=True, silent=True) or {}
+        source = str(data.get("source") or "").strip()
+        out_dir = str(data.get("output") or "").strip()
+        if not source or not out_dir:
+            return api_error(ValueError("dossier source et dossier de sortie requis"))
+        formats = [f for f in (data.get("formats") or ["step"])
+                   if f in ("step", "stl", "brep")] or ["step"]
+        options = batch.Options(
+            config=data.get("config") or None,
+            repertoire=str(data.get("repertoire") or "").strip() or None,
+            formats=tuple(formats),
+            plans=bool(data.get("plans", True)),
+            booklet=bool(data.get("booklet", True)),
+            models=bool(data.get("models", True)),
+            dxf=bool(data.get("dxf", False)),
+            force=bool(data.get("force", False)),
+            limit=int(data["limit"]) if data.get("limit") else None,
+            workers=max(1, int(data.get("workers") or 1)),
+        )
+        try:
+            return jsonify(app.config["CAMPAIGN"].start([source], out_dir, options))
+        except Exception as exc:
+            return api_error(exc)
+
+    @app.get("/api/batch/status")
+    def batch_status():
+        return jsonify(app.config["CAMPAIGN"].state())
+
+    @app.post("/api/batch/stop")
+    def batch_stop():
+        return jsonify(app.config["CAMPAIGN"].stop())
 
     @app.post("/api/shutdown")
     def shutdown():

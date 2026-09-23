@@ -462,7 +462,12 @@ function renderDims(d) {
       const prog = b.springback
         ? `<span class="prog" title="angle programmé, élasticité comprise">R15 ${b.r15}°</span>`
         : '';
-      rows.push(`<tr><td>Coude ${bend + 1} ${prog}</td><td class="num">—</td>
+      // Une équerre reste une équerre : le dire évite qu'on lise 90° comme le
+      // résultat approché d'un coefficient, alors que c'est la cote demandée.
+      const eq = b.locked
+        ? `<span class="lock" title="R15 entre 90 et 94 : la règle d'atelier impose 90,0°, le coefficient d'élasticité ne s'applique pas">équerre</span>`
+        : '';
+      rows.push(`<tr><td>Coude ${bend + 1} ${prog}${eq}</td><td class="num">—</td>
                  <td class="num">${fmt(b.angle, 1)}°</td>
                  <td class="num">${fmt(b.rotation, 1)}°</td></tr>`);
       bend += 1;
@@ -1221,12 +1226,15 @@ async function renderSettings() {
         ${m === config.angle_mode ? 'selected' : ''}>${MODE_LABELS[m] || m}</option>`).join('')}</select></div>
     <div class="set-row"><label>Sens de rotation (axe B)</label>
       <select id="s_hand">
-        <option value="1" ${config.handedness === 1 ? 'selected' : ''}>+1 — sens direct</option>
-        <option value="-1" ${config.handedness === -1 ? 'selected' : ''}>−1 — sens inverse (pièce miroir)</option>
+        <option value="1" ${config.handedness === 1 ? 'selected' : ''}>+1 — B positif = horaire (convention BSA)</option>
+        <option value="-1" ${config.handedness === -1 ? 'selected' : ''}>−1 — B positif = antihoraire (pièce miroir)</option>
       </select></div>
-    <p class="note">Le sens de rotation est global. Il ne dépend pas de la tête :
-      écrire +180 en tête du bas et −180 en tête du haut, c'est choisir un
-      chemin, pas inverser l'axe <span class="src">[DOC 8.3.5]</span>.</p>
+    <p class="note">B+90 tourne dans le sens des aiguilles d'une montre, B−90
+      dans l'autre, pour un observateur placé à l'extrémité <b>B</b> et
+      regardant vers <b>A</b> — c'est-à-dire en regardant le tube revenir vers
+      la machine. Le sens est global : il ne dépend pas de la tête. Écrire +180
+      en tête du bas et −180 en tête du haut, c'est choisir un chemin, pas
+      inverser l'axe <span class="src">[DOC 8.3.5]</span>.</p>
 
     <h3 class="sec">Outillage par diamètre</h3>
     ${cards}

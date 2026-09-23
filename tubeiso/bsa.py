@@ -184,6 +184,37 @@ def last_straight(r6: float, known_straights, angles_deg, diameter: float,
 
 SPRINGBACK_MAX = 6          # supplement maximal envisage, en degres
 
+# --------------------------------------------------------- verrouillage a 90
+#
+# Le coefficient d'elasticite est une moyenne. Le programmeur, lui, ecrit ce
+# qui sort de SA machine ce jour-la, avec CETTE matrice : pour un coude a 90
+# degres on trouve dans le parc 90, 92, 92.5, 93 et 94, selon le diametre, la
+# serie et l'habitude de celui qui a programme. Inverser le coefficient sur ces
+# valeurs rend 89, 90, 90.5 ou 91 — c'est-a-dire tout sauf l'equerre qui etait
+# demandee, et un sous-traitant qui plie a 89 degres livre une piece qui ne
+# monte pas.
+#
+# La regle d'atelier prime donc sur le calcul : **un R15 compris dans cette
+# fenetre decrit un coude a 90 degres.** Sur les 558 coudes du corpus d'essai,
+# 217 sont programmes R15=92 — c'est de loin la valeur la plus frequente, et
+# c'est une equerre.
+#
+# La table est volontairement ouverte : y ajouter 45.0 ferait la meme chose
+# pour les coudes a 45 degres, ou l'on observe R15 = 46, 46.5 et 47. On ne l'a
+# pas fait sans consigne, parce que 46 peut aussi decrire un vrai 46 degres.
+ANGLE_LOCK: dict[float, tuple[float, float]] = {
+    # angle reel : (R15 minimum, R15 maximum) inclus
+    90.0: (90.0, 94.0),
+}
+
+
+def locked_angle(r15: float) -> float | None:
+    """Angle impose par la regle d'atelier, ou None si le calcul s'applique."""
+    for angle, (lo, hi) in ANGLE_LOCK.items():
+        if lo - 1e-9 <= r15 <= hi + 1e-9:
+            return float(angle)
+    return None
+
 
 def _round_half_up(x: float) -> float:
     """Arrondi d'atelier : 0.5 monte. round() de Python arrondit au pair le
@@ -222,6 +253,11 @@ def real_angle(r15: float, diameter: float, mode: str = "entier"
     mode == "proportionnel" applique r15 * 90 / R15_FOR_90, sans arrondi.
     mode == "brut"         aucune correction ; R15 est pris pour l'angle reel.
 
+    Hors du mode "brut", un R15 couvert par `ANGLE_LOCK` rend l'angle verrouille
+    sans passer par le coefficient. L'aller-retour angle -> R15 -> angle n'est
+    alors plus bijectif, et c'est voulu : plusieurs R15 decrivent la meme
+    equerre, et `programmed_angle` rend celui de la table.
+
     Retourne toujours un couple, pour que l'interface puisse afficher les deux
     valeurs cote a cote : ce qui est programme et ce qui sort de la machine.
     """
@@ -229,6 +265,11 @@ def real_angle(r15: float, diameter: float, mode: str = "entier"
     rate = springback_rate(d)
     if mode == "brut" or rate == 0.0 or r15 <= 0:
         return float(r15), 0.0
+
+    # La regle d'atelier passe avant le coefficient : voir ANGLE_LOCK.
+    verrou = locked_angle(r15)
+    if verrou is not None:
+        return verrou, float(r15) - verrou
 
     proportional = r15 * 90.0 / R15_FOR_90[d]
     if mode == "proportionnel":

@@ -192,16 +192,66 @@ def test_lft_entete_introuvable():
 # ------------------------------------------------------- v5 : retour elastique
 
 def test_retour_elastique_aller_retour():
-    """R15 -> angle reel -> R15 doit boucler, et donner des angles ronds."""
+    """R15 -> angle reel -> R15 doit boucler, et donner des angles ronds.
+
+    Hors de la fenetre d'equerre : dans cette fenetre plusieurs R15 decrivent
+    le meme coude a 90 degres, donc l'aller-retour n'est plus bijectif et ne
+    peut pas etre exige (voir test_equerre_a_90 juste apres).
+    """
     from tubeiso import bsa
-    cas = [(6, 46, 45), (6, 13, 13), (6, 39, 38), (6, 90, 88), (6, 77, 75),
-           (4, 94, 91), (4, 34, 33), (4, 54, 52), (4, 26, 25),
-           (8, 92, 90), (8, 44, 43), (8, 31, 30), (8, 10, 10)]
+    cas = [(6, 46, 45), (6, 13, 13), (6, 39, 38), (6, 77, 75),
+           (4, 34, 33), (4, 54, 52), (4, 26, 25),
+           (8, 44, 43), (8, 31, 30), (8, 10, 10)]
     for d, r15, attendu in cas:
+        assert bsa.locked_angle(r15) is None, f"cas mal choisi : R15={r15}"
         reel, delta = bsa.real_angle(r15, d)
         assert reel == attendu, f"Ø{d} R15={r15} -> {reel}, attendu {attendu}"
         assert bsa.programmed_angle(reel, d) == r15, f"Ø{d} : aller-retour casse"
         assert delta == r15 - attendu
+
+
+def test_equerre_a_90():
+    """Un R15 de 90 a 94 decrit une equerre, quel que soit le diametre.
+
+    Le coefficient d'elasticite est une moyenne ; le programmeur ecrit ce qui
+    sort de SA machine. Sur le corpus d'essai, R15=92 represente 39 % des
+    coudes — ce sont des equerres, et les rendre a 89 ou 91 degres livrait une
+    piece qui ne monte pas.
+    """
+    from tubeiso import bsa
+    for d in (4, 6, 8, 10, 12, 15, 16, 18):
+        for r15 in (90, 91, 92, 92.5, 93, 94):
+            reel, delta = bsa.real_angle(r15, d)
+            assert reel == 90.0, f"Ø{d} R15={r15} -> {reel}"
+            assert delta == r15 - 90.0
+
+    # hors fenetre, le calcul reprend la main
+    assert bsa.real_angle(95, 6)[0] != 90.0
+    assert bsa.real_angle(89, 6)[0] != 90.0
+    assert bsa.locked_angle(94.0) == 90.0 and bsa.locked_angle(94.5) is None
+    # le mode brut ne corrige rien, verrou compris
+    assert bsa.real_angle(92, 8, "brut") == (92.0, 0.0)
+
+
+def test_equerre_est_tracee_dans_la_piece():
+    """Le verrou doit se voir : sur la piece, et dans les remarques."""
+    from tubeiso import conventions, validate
+    from tubeiso.model import Tooling
+
+    prog = PROG.replace("R15=46", "R15=92").replace("R15=13", "R15=93")
+    raw = crippa.parse(prog)
+    tooling = Tooling("L56", 6.0, clr=11.0)
+    tube = conventions.get("bsa").build(raw, tooling)
+    assert [b.angle for b in tube.bends] == [90.0, 90.0]
+    assert all(b.locked for b in tube.bends)
+    assert any("verrouillé à 90" in w for w in tube.warnings)
+    # information, jamais une anomalie : une equerre est une cote sure
+    niveaux = {i.level for i in validate.check(tube, tooling)
+               if "verrouillé" in i.message}
+    assert niveaux == {validate.INFO}
+    # et le classement ne doit pas dependre d'un accent
+    assert validate._sans_accents("angle verrouillé à 90°") \
+        .startswith("angle verrouille a 90")
 
 
 def test_mode_brut_ne_corrige_rien():
@@ -382,16 +432,22 @@ def test_r7_deja_present_ne_declenche_pas_d_alerte():
 
 
 def test_angles_au_demi_degre():
-    """Le programmeur ecrit au demi-degre : 92.5 en Ø8 doit rester lisible."""
+    """Le programmeur ecrit au demi-degre : 46.5 en Ø6 doit rester lisible."""
     from tubeiso import bsa
-    assert bsa.real_angle(92.5, 8)[0] == 90.5
+    assert bsa.real_angle(46.5, 6)[0] == 45.5
     assert bsa.real_angle(46, 4)[0] == 45.0, "l'exemple meme de [DOC 5.4]"
-    assert bsa.real_angle(92, 12)[0] == 90.0
     assert bsa.real_angle(25.5, 6)[0] == 25.0
-    # l'aller-retour reste exact sur tous les angles entiers
+    assert bsa.real_angle(92.5, 8)[0] == 90.0, "un R15 de 92.5 reste une équerre"
+    # L'aller-retour reste exact sur tous les angles entiers, SAUF ceux que le
+    # verrou d'equerre ramene volontairement a 90 : la, plusieurs R15 mènent au
+    # meme angle, et c'est le but.
     for d in (4, 6, 8, 10, 12, 15, 16, 18):
         for theta in range(5, 186):
             r15 = bsa.programmed_angle(theta, d)
+            if bsa.locked_angle(r15) is not None:
+                assert bsa.real_angle(r15, d)[0] == 90.0
+                assert abs(theta - 90) <= 3, (d, theta, r15)
+                continue
             assert bsa.real_angle(r15, d)[0] == theta, (d, theta, r15)
 
 
@@ -946,6 +1002,74 @@ def test_le_plan_dit_lui_meme_qu_il_n_a_pas_de_modele():
     # le chiffre de la matière manquante ne doit pas être coupé
     assert "mm de matière manquante" in svg
     assert "…" not in svg.split("AUCUN MODÈLE")[0].split("CONTRÔLE EN ERREUR")[-1]
+
+
+# ------------------------------------- v6.3 : sens de l'axe B (B+ = horaire)
+
+def test_rotation_B_positive_est_horaire():
+    """B+90 tourne dans le sens des aiguilles d'une montre, B-90 dans l'autre.
+
+    L'observateur est a l'extremite aval et regarde le tube revenir vers la
+    machine. Jusqu'a la v6.3 le code appliquait l'inverse : le cartouche du
+    plan annonçait « horaire » et la piece sortait en miroir, a l'ecran comme
+    au format STEP.
+
+    Le test raisonne sur les vecteurs, pas sur une image : avec un seul coude
+    de 90 degres, le tube part suivant +X et se couche vers +Z quand B=0. Pour
+    l'observateur place en aval (+X pointe vers lui), +Z est « en haut » et +Y
+    est « a droite ». Passer de haut a droite, c'est tourner dans le sens
+    horaire — donc B=+90 doit amener l'extremite suivant +Y.
+    """
+    import numpy as np
+
+    from tubeiso import geometry
+    from tubeiso.model import Bend, TubeProgram
+
+    def sortie(rotation, hand=1):
+        t = TubeProgram(ref="B", diameter=8, straights=[50.0, 50.0],
+                        bends=[Bend(angle=90.0, rotation=rotation, clr=14.0)])
+        cl = geometry.build(t, handedness=hand)
+        v = cl.points[-1] - cl.points[-2]
+        return v / np_norm(v)
+
+    haut, droite = np.array([0, 0, 1.0]), np.array([0, 1.0, 0])
+    assert np_norm(sortie(0) - haut) < 1e-9, "sans rotation, le tube se couche vers +Z"
+    assert np_norm(sortie(+90) - droite) < 1e-9, "B+90 : de haut vers la droite = horaire"
+    assert np_norm(sortie(-90) + droite) < 1e-9, "B-90 : vers la gauche = antihoraire"
+
+    # le reglage d'atelier refait bien la piece miroir
+    assert np_norm(sortie(+90, hand=-1) + droite) < 1e-9
+
+    # un demi-tour est un demi-tour, quel que soit le signe [DOC 8.3.5]
+    assert np_norm(sortie(+180) - sortie(-180)) < 1e-9
+
+
+def test_step_relu_rend_les_memes_rotations():
+    """Aller-retour complet : LRA -> solide -> STEP -> LRA.
+
+    C'est le seul controle qui prouve que le fichier livre au sous-traitant
+    tourne du meme cote que le programme d'origine. Le lecteur de STEP mesure
+    un angle direct autour de la tangente ; sans le facteur geometry.B_SIGN il
+    rendait des rotations de signe oppose.
+    """
+    import tempfile
+
+    from tubeiso import geometry, solid, stepreader
+    from tubeiso.model import Bend, Tooling, TubeProgram
+
+    rotations = [0.0, 90.0, -90.0, 45.0, -135.0]
+    tube = TubeProgram(ref="RT", diameter=8.0,
+                       straights=[60.0, 55.0, 55.0, 55.0, 55.0, 60.0],
+                       bends=[Bend(angle=90.0, rotation=r, clr=14.0)
+                              for r in rotations])
+    tooling = Tooling("Ø8", 8.0, clr=14.0, wall=1.0)
+    cl = geometry.build(tube)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = solid.export(tube, cl, Path(tmp), tooling, ["step"], basename="rt")[0]
+        lra = stepreader.analyse(str(f))["lra"]
+    assert [round(v, 2) for v in lra["rotations"]] == rotations
+    assert [round(v, 2) for v in lra["angles"]] == [90.0] * 5
+    assert [round(v, 2) for v in lra["segments"]] == tube.straights
 
 
 def _run() -> int:

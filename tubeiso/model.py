@@ -35,7 +35,10 @@ class Bend:
                  la geometrie, donc le modele 3D et le plan.
     `r15`        angle PROGRAMME, tel qu'il est ecrit dans le bloc L2/L3.
     `springback` supplement d'elasticite retire : r15 - angle. [DOC 5.4]
-    `rotation`   rotation du plan de cintrage AVANT ce coude (axe B).
+    `rotation`   rotation du plan de cintrage AVANT ce coude (axe B), positive
+                 dans le sens horaire vu de l'extremite aval vers la machine.
+    `locked`     l'angle vient de la regle d'atelier (equerre a 90 degres) et
+                 non du coefficient d'elasticite. [bsa.ANGLE_LOCK]
     """
 
     angle: float
@@ -43,6 +46,7 @@ class Bend:
     clr: float | None = None     # peut surcharger l'outillage (matrices multi-rayon)
     r15: float | None = None
     springback: float = 0.0
+    locked: bool = False
 
     def __post_init__(self) -> None:
         if self.r15 is None:

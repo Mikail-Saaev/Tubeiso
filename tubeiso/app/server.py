@@ -400,7 +400,7 @@ class Session:
         } for pr in cl.primitives]
 
         bends = [{"angle": round(b.angle, 4), "r15": b.r15,
-                  "springback": round(b.springback, 4),
+                  "springback": round(b.springback, 4), "locked": b.locked,
                   "rotation": b.rotation, "clr": b.clr} for b in tube.bends]
 
         return {

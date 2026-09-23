@@ -14,6 +14,7 @@ remplace ici par les deux seuls temoins reellement independants du calcul :
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from . import bsa, geometry
@@ -44,6 +45,12 @@ TRUNCATION_TOL = 2.0
 UNSAFE_CODES = {"programme_tronque_perte", "diametre_absent", "longueur_absente"}
 
 
+def _sans_accents(texte: str) -> str:
+    """Minuscules sans accents, pour comparer un libelle a un mot-cle."""
+    return "".join(c for c in unicodedata.normalize("NFD", str(texte).lower())
+                   if unicodedata.category(c) != "Mn")
+
+
 @dataclass
 class Issue:
     level: str
@@ -64,10 +71,15 @@ def check(tube: TubeProgram, tooling: Tooling,
     d = int(tube.diameter) if tube.diameter else 0
 
     for w in tube.warnings:
-        if ("retour elastique" in w or "reconstitue depuis" in w
-                or "faux pli" in w):
+        # Les remarques finissent sur un plan envoye a un sous-traitant : elles
+        # sont ecrites en francais accentue. Le classement, lui, ne doit pas
+        # dependre d'un accent — sans quoi corriger une coquille reclasse
+        # silencieusement une information en alerte.
+        plat = _sans_accents(w)
+        if ("retour elastique" in plat or "reconstitue depuis" in plat
+                or "faux pli" in plat or "verrouille a 90" in plat):
             lvl = INFO
-        elif "negatif" in w:
+        elif "negatif" in plat:
             # Un segment negatif est une impossibilite geometrique : le
             # programme ne decrit pas la piece qu'il pretend decrire.
             # Une simple absence de M30, elle, ne prouve rien : c'est le

@@ -13,6 +13,13 @@ import * as THREE from './vendor/three.module.min.js';
 
 export const ROT_PART = 0.35;   // part du pas consacrée à la rotation
 
+/* Signe de l'axe B — doit rester identique à `geometry.B_SIGN` côté Python.
+ * B positif = rotation horaire du plan de cintrage, vue depuis l'aval, donc
+ * rotation NÉGATIVE dans le repère direct. `tests/test_simulation.mjs`
+ * compare cette reconstruction à la géométrie Python : si les deux signes
+ * divergent, le test tombe. */
+export const B_SIGN = -1;
+
 const rad = (d) => (d * Math.PI) / 180;
 const arcLength = (b) => b.clr * rad(b.angle);
 
@@ -48,7 +55,7 @@ export function centerlineAt(sim, progress) {
     const bendF = Math.max((step - ROT_PART) / (1 - ROT_PART), 0);
 
     if (bends[i].rotation && rotF > 0) {
-      u.applyAxisAngle(t, hand * rad(bends[i].rotation) * rotF);
+      u.applyAxisAngle(t, B_SIGN * hand * rad(bends[i].rotation) * rotF);
       u.addScaledVector(t, -u.dot(t)).normalize();
     }
 

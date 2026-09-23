@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
+from . import geometry
+
 TOL = 1e-6
 JOIN_TOL = 1e-4          # tolerance de raccordement entre deux faces voisines
 
@@ -259,7 +261,11 @@ def to_lra(ordered: list[Feature]) -> dict:
         a, b = a / na, b / nb
         ang = math.degrees(math.atan2(float(np.dot(np.cross(a, b), t)),
                                       float(np.clip(np.dot(a, b), -1, 1))))
-        rotations.append(ang)
+        # `ang` est l'angle direct autour de la tangente. L'axe B de la machine
+        # compte dans l'autre sens (voir geometry.B_SIGN) : sans ce facteur,
+        # relire un STEP produit par l'application rendait des rotations de
+        # signe oppose a celles du programme d'origine.
+        rotations.append(geometry.B_SIGN * ang)
 
     radii = sorted({round(r, 4) for f in ordered for r in f.radii})
     return {

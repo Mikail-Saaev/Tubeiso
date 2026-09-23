@@ -234,6 +234,19 @@ chaque diamètre, et **tout champ qui s'en écarte passe en orange**.
 immédiatement : l'effet de chaque réglage est donc visible tout de suite.
 `Réinitialiser` remet les valeurs BSA.
 
+**Le sens de rotation.** `B+90` tourne dans le sens des aiguilles d'une
+montre, `B−90` dans l'autre, pour un observateur placé à l'extrémité **B** du
+tube et qui regarde vers **A** — c'est-à-dire qui regarde le tube revenir vers
+la machine. Le réglage `−1` refait la pièce miroir, pour une machine qui
+compterait l'axe à l'envers ; il n'y a pas de raison d'y toucher sur la
+Crippa.
+
+**Les équerres.** Un coude marqué `équerre` dans l'onglet *Cotations* a son
+angle fixé à 90,0° parce que son `R15` tombe entre 90 et 94. C'est voulu : la
+Crippa programme une équerre à 92, 92,5, 93 ou 94 selon le diamètre et la
+série, et appliquer le coefficient d'élasticité à ces valeurs donnerait 89°
+ou 91° — une pièce qui ne monte pas.
+
 ---
 
 ## Si ça coince

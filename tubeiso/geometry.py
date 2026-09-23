@@ -5,10 +5,19 @@ Convention adoptee :
   - `u` est le vecteur de reference qui pointe vers le centre de courbure
   - a chaque coude, on tourne d'abord `u` autour de `t` (rotation B),
     puis on courbe dans le plan (t, u)
-  - une rotation B positive est trigonometrique vue depuis l'aval
+  - **une rotation B positive est HORAIRE, vue depuis l'aval** : l'observateur
+    se place a l'extremite deja formee et regarde revenir le tube vers la
+    machine. B+90 tourne donc dans le sens des aiguilles d'une montre, B-90
+    dans l'autre. C'est la convention BSA, et c'est celle qu'annonce le
+    cartouche du plan.
 
-Le signe de B et le sens de reference dependent de la machine. Si les pieces
-sortent en miroir, inverser `handedness` (voir build()).
+Jusqu'a la v6.3 le code appliquait l'inverse : le plan portait la bonne
+mention, mais la piece sortait en miroir a l'ecran comme au format STEP. Le
+signe vit desormais dans `B_SIGN`, une seule fois, et `stepreader` l'utilise
+pour relire un STEP dans le meme sens.
+
+`handedness` reste le reglage d'atelier : -1 refait la piece miroir, pour une
+machine qui compterait B a l'envers.
 """
 from __future__ import annotations
 
@@ -18,6 +27,17 @@ from dataclasses import dataclass
 import numpy as np
 
 from .model import TubeProgram
+
+
+# Signe de l'axe B dans le repere direct.
+#
+# `rodrigues(u, t, +a)` tourne dans le sens direct autour de t, ce qui parait
+# ANTIhoraire a un observateur place en aval (t pointe vers lui). Comme B
+# positif doit paraitre HORAIRE a ce meme observateur, la rotation appliquee
+# porte le signe oppose. Une seule ligne, un seul endroit : c'est ce qui
+# garantit que la vue 3D, le plan isometrique, le STEP et la simulation
+# tournent tous du meme cote.
+B_SIGN = -1
 
 
 def rodrigues(v: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
@@ -82,7 +102,11 @@ class MissingRadius(ValueError):
 
 
 def build(tube: TubeProgram, samples: int = 24, handedness: int = 1) -> Centerline:
-    """Construit la fibre neutre. handedness = -1 inverse le sens des rotations."""
+    """Construit la fibre neutre.
+
+    `handedness = 1` applique la convention BSA : B positif = horaire vu de
+    l'aval. `handedness = -1` produit la piece miroir.
+    """
     if not tube.bends:
         # Tube droit. La longueur est la SOMME des droites : un tube sans coude
         # peut en porter plusieurs (premier segment + dernier deduit de R6).
@@ -124,7 +148,8 @@ def build(tube: TubeProgram, samples: int = 24, handedness: int = 1) -> Centerli
 
         # rotation du plan de cintrage autour de l'axe du tube
         if bend.rotation:
-            u = rodrigues(u, t, handedness * math.radians(bend.rotation))
+            u = rodrigues(u, t,
+                          B_SIGN * handedness * math.radians(bend.rotation))
             u -= np.dot(u, t) * t          # reorthogonalisation anti-derive
             u /= np.linalg.norm(u)
 

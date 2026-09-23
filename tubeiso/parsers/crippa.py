@@ -208,9 +208,9 @@ def parse(text: str, ref: str = "") -> RawProgram:
         # Constat, pas verdict : c'est le controle de longueur qui dira si la
         # troncature a coute de la geometrie ou seulement la fin de ligne.
         prog.warnings.append("pas de M30 : fin de programme absente, "
-                             "troncature a verifier")
+                             "troncature à vérifier")
     if not prog.blocks:
-        prog.warnings.append("aucun bloc de cintrage trouve")
+        prog.warnings.append("aucun bloc de cintrage trouvé")
     if prog.blocks and prog.blocks[-1].sub != 3:
         prog.warnings.append("le dernier bloc n'est pas un L3 (cycle final absent)")
     for b in prog.blocks:

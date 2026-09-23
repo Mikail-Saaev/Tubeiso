@@ -444,11 +444,16 @@ def _draw_data_column(s: sh.Sheet, d: PlanData) -> None:
             ("Rayon de fibre neutre Rm", f"{tl.clr:g} mm" if tl.clr else "—"),
             ("Nombre de coudes", str(tube.n_bends)),
             ("Somme des angles", f"{total:g}°"),
-            ("Rotation B positive", "horaire vue de l'aval"
-             if d.handedness >= 0 else "antihoraire vue de l'aval"),
+            ("Rotation B positive", "horaire, vue de B vers A"
+             if d.handedness >= 0 else "antihoraire, vue de B vers A"),
             ("Faux pli à 0°", f"{len(tube.false_bends)} fusionné(s)"
              if tube.false_bends else "aucun"),
         ]
+        verrous = sum(1 for b in tube.bends if b.locked)
+        if verrous:
+            # Un R15 de 90 a 94 decrit une equerre : le dire sur le plan evite
+            # qu'un sous-traitant croie a un 89 ou un 91 mesure au rapporteur.
+            cintrage.append(("Équerres à 90°", f"{verrous} coude(s) verrouillé(s)"))
     else:
         # Aucun coude : afficher un rayon de matrice induirait en erreur.
         cintrage = [
@@ -579,7 +584,9 @@ NOTES = [
     "contient déjà la surcompensation d'élasticité propre à cette machine. Un autre "
     "moyen de production doit appliquer sa PROPRE compensation à partir de l'angle réel.",
     "La rotation B est appliquée AVANT le cintrage du coude concerné, autour de l'axe "
-    "du tube, positive dans le sens horaire vu depuis l'aval. B et B±360 sont équivalents.",
+    "du tube. Elle est positive dans le sens HORAIRE pour un observateur placé à "
+    "l'extrémité B et regardant vers A, c'est-à-dire en regardant le tube revenir "
+    "vers la machine. B et B±360 sont équivalents.",
     "Le rayon Rm est le rayon de la FIBRE NEUTRE. Toute autre valeur change la longueur "
     "développée et rend le débit faux.",
     "Cotes relevées au demi-millimètre et angles au degré, conformément à la méthode de "
@@ -587,6 +594,13 @@ NOTES = [
     "Le repère du dessin est celui du tube : origine au point A, premier segment suivant "
     "+X, première rotation mesurée depuis le plan XZ.",
 ]
+
+NOTE_VERROU_90 = (
+    "Les coudes marqués « 90° » sont des ÉQUERRES. La Crippa les programme "
+    "entre R15=90 et R15=94 selon le diamètre et la série ; appliquer le "
+    "coefficient d'élasticité à ces valeurs donnerait 89, 90,5 ou 91°, ce qui "
+    "n'a jamais été la cote demandée. L'angle à obtenir est 90,0°."
+)
 
 
 def _draw_ends_block(s: sh.Sheet, d: PlanData, box) -> None:
@@ -692,7 +706,11 @@ def _draw_page2(s: sh.Sheet, d: PlanData, pages: int) -> None:
 
     # --- colonne droite : notes, controles, programme
     rx0, ry0, rx1, ry1 = P2_RIGHT
-    notes = NOTES if d.tube.bends else NOTES_DROIT
+    notes = list(NOTES if d.tube.bends else NOTES_DROIT)
+    if any(b.locked for b in d.tube.bends):
+        # Note placee en tete : c'est la seule qui change une cote lue sur le
+        # tableau LRA, donc celle qu'il ne faut pas manquer.
+        notes.insert(0, NOTE_VERROU_90)
     note_h = 12 + 3.4 * sum(len(sh.wrap(s, n, rx1 - rx0 - 8, 2.15)) + 0.4
                             for n in notes)
     note_h = min(note_h, 92.0)

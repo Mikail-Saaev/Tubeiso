@@ -174,8 +174,34 @@ l'interface :
 | `proportionnel` | `R15 × 90 / R15₉₀` | 45,00° |
 | `brut` | aucune correction (comportement ≤ v4) | 46° |
 
-Le mode `entier` restitue des angles ronds sur tout le corpus : 90, 45, 91,
-88, 75, 43, 30. Il boucle exactement — `programmed_angle(real_angle(x)) == x`.
+Le mode `entier` restitue des angles ronds sur tout le corpus : 90, 45, 43,
+30, 25. Il boucle exactement — `programmed_angle(real_angle(x)) == x` — sauf
+là où la règle d'équerre ci-dessous tranche à sa place.
+
+### L'équerre prime sur le coefficient
+
+Le coefficient est une moyenne ; le programmeur, lui, écrit ce qui sort de
+**sa** machine ce jour-là, avec **cette** matrice. Pour un coude à 90° on
+trouve dans le parc `R15` = 90, 92, 92,5, 93 et 94 selon le diamètre, la série
+et l'habitude de celui qui a programmé. Inverser le coefficient sur ces
+valeurs rendait 89°, 90,5° ou 91° — c'est-à-dire tout sauf l'équerre qui était
+demandée, et un sous-traitant qui plie à 89° livre une pièce qui ne monte pas.
+
+**Un `R15` compris entre 90 et 94 décrit donc un coude à 90,0°**, quel que
+soit le diamètre. C'est la table `bsa.ANGLE_LOCK`, et elle passe avant le
+calcul. Sur les 558 coudes du corpus d'essai, `R15 = 92` en représente 39 % à
+lui seul : c'est de très loin la valeur la plus fréquente, et c'est une
+équerre.
+
+La conséquence est assumée : l'aller-retour n'est plus bijectif dans cette
+fenêtre, puisque cinq `R15` différents décrivent la même équerre. Le plan le
+dit — le cartouche compte les coudes verrouillés, la table LRA montre les deux
+colonnes côte à côte (`angle réel` 90 / `R15 programmé` 94), et une note de
+fabrication en tête de page 2 explique pourquoi.
+
+La table est ouverte : y ajouter `45.0` ferait la même chose pour les coudes à
+45°, où l'on observe `R15` = 46, 46,5 et 47. Ce n'est pas fait sans consigne,
+parce qu'un 46 peut aussi décrire un vrai 46°.
 
 Toute la chaîne de longueur travaille aussi sur l'angle réel. C'est
 contre-intuitif mais c'est ce que dit le [DOC 8.3.4] : la colonne `R15` du
@@ -260,7 +286,9 @@ disent, noir sur blanc, ce qu'un plan de cintrage laisse d'ordinaire implicite :
   Un autre moyen de production doit repartir de l'angle réel et appliquer la
   sienne. C'est l'erreur qui produit des pièces fausses en série ;
 * la rotation B s'applique **avant** le cintrage du coude concerné, et B ± 360
-  sont équivalents ;
+  sont équivalents. **B positif tourne dans le sens horaire** pour un
+  observateur placé à l'extrémité B qui regarde vers A, c'est-à-dire qui
+  regarde le tube revenir vers la machine ; B négatif dans l'autre sens ;
 * le rayon Rm est celui de la **fibre neutre**.
 
 Le même dessin sort en SVG pour l'aperçu de l'application et en PDF pour la
@@ -445,18 +473,14 @@ quelle proportion du parc a une PROGCRIPPA exploitable.
 
 ## Ce qui reste à faire
 
-1. **Vérifier le sens de rotation** sur une pièce réelle. Un seul réglage
-   global, `handedness` ; une erreur de signe donne une pièce en miroir,
-   plausible et immontable. Une seule mesure suffit à trancher, et c'est le
-   dernier point qui empêche de signer les plans les yeux fermés.
-2. **La séquence de changement de tête** [DOC 5.6] contient des déplacements Y
+1. **La séquence de changement de tête** [DOC 5.6] contient des déplacements Y
    de repositionnement que le parseur compte encore comme de l'avance tube.
    Huit programmes sur cent quarante-cinq sont concernés dans le corpus d'essai.
-3. **Déduire les profondeurs d'emmanchement** des longueurs du premier et du
+2. **Déduire les profondeurs d'emmanchement** des longueurs du premier et du
    dernier segment quand les extrémités sont serties. Les tables sont en place
    et figurent sur le plan ; la règle de déduction reste à confirmer avec le
    bureau des méthodes.
-4. **Les indices de révision.** Le cartouche porte un indice fixe `A` : il
+3. **Les indices de révision.** Le cartouche porte un indice fixe `A` : il
    faudra le faire vivre le jour où un plan est réédité après modification.
 
 ## Structure

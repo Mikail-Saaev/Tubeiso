@@ -581,7 +581,7 @@ tbody td {
 tbody tr:hover td { background: var(--raised); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
 tr.tot td { font-weight: 600; border-top: 1px solid var(--line-2); border-bottom: 0; }
-.prog {
+.prog, .lock {
   display: inline-block;
   font: 10px/1 var(--mono);
   color: var(--warn);
@@ -590,6 +590,8 @@ tr.tot td { font-weight: 600; border-top: 1px solid var(--line-2); border-bottom
   padding: 2px 4px;
   margin-left: 4px;
 }
+/* Une équerre verrouillée n'est pas une anomalie : c'est une cote sûre. */
+.lock { color: var(--ok); background: var(--ok-bg); }
 table.lft td.col {
   font: 11px/1.4 var(--mono);
   color: var(--ink-3);

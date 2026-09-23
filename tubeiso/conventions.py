@@ -94,15 +94,17 @@ class BSAConvention:
                 warnings.append("dernier segment repris de DS, valeur non fiable")
         elif last < 0:
             warnings.append(
-                f"dernier segment negatif ({last:.1f} mm) : programme incomplet "
+                f"dernier segment négatif ({last:.1f} mm) : programme incomplet "
                 "ou R6 faux")
         straights.append(last)
 
         bends = []
         for i, (true, delta) in enumerate(real):
             rot = raw.blocks[i - 1].rotation() if i > 0 else 0.0
+            verrou = (angle_mode != "brut"
+                      and bsa.locked_angle(r15[i]) == true)
             bends.append(Bend(angle=true, rotation=rot, clr=clr,
-                              r15=r15[i], springback=delta))
+                              r15=r15[i], springback=delta, locked=verrou))
 
         # --- faux pli a 0 degre [DOC 5.3 ; XLSM Feuil2!B53]
         # « Le dernier segment ne doit pas faire plus de 450 mm sinon faire un
@@ -118,8 +120,16 @@ class BSAConvention:
         if angle_mode != "brut" and any(b.springback for b in bends):
             total = sum(b.springback for b in bends)
             warnings.append(
-                f"retour elastique retire : {total:g}° au total sur "
+                f"retour élastique retiré : {total:g}° au total sur "
                 f"{sum(1 for b in bends if b.springback)} coude(s) [DOC 5.4]")
+
+        verrous = [b for b in bends if b.locked]
+        if verrous:
+            ecrits = sorted({f"{b.r15:g}" for b in verrous})
+            warnings.append(
+                f"angle verrouillé à 90° sur {len(verrous)} coude(s) "
+                f"(R15 écrit : {', '.join(ecrits)}) : la règle d'atelier prime "
+                "sur le coefficient d'élasticité [bsa.ANGLE_LOCK]")
 
         return TubeProgram(
             ref=raw.name, program=raw.name, diameter=diameter,
